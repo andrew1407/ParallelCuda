@@ -10,12 +10,12 @@ Every lab follows the same host/device structure: the host (`__host__`) allocate
 
 | Lab | Topic | What it demonstrates |
 | --- | --- | --- |
-| [`1-lab`](1-lab) | Matrix multiplication | A 2D-grid `matrixMult` kernel ([`kernel.cu`](1-lab/kernel.cu)) multiplies two 211×211 integer matrices read from a file, verifies the result against a CPU reference, writes the output to a file, and times the kernel with `std::chrono`. |
-| [`2-lab`](2-lab) | Animated function plot | A real-time GLUT/`CPUAnimBitmap` animation ([`kernel.cu`](2-lab/kernel.cu)) rendering the curve `tan(sin(x) + cos(x))`; thread/block dimensions are derived from the device's `maxThreadsPerBlock`, and each frame is rendered on the GPU and copied to the host bitmap. |
-| [`3-lab`](3-lab) | Parallel reduction in shared memory | Computes six harmonic-style sums concurrently ([`kernel.cu`](3-lab/kernel.cu)) using `__shared__` per-block caches and a tree reduction with `__syncthreads`, then finishes the block-level sums on the host. |
-| [`4-lab`](4-lab) | Constant vs. global memory | Runs the same array computation twice ([`kernel.cu`](4-lab/kernel.cu)), once reading coefficients from `__constant__` memory (`cudaMemcpyToSymbol`) and once from global memory, comparing their elapsed time via CUDA events. |
-| [`5-lab`](5-lab) | Monte Carlo Pi (atomics) | Estimates Pi by sampling random points with `curand` and counting hits with `atomicAdd` ([`kernel.cu`](5-lab/kernel.cu)), offering an optimized (count points outside the circle) and an unoptimized variant, timed with CUDA events. |
-| [`control-task`](control-task) | Multi-layer reduction pipeline | Passes a random array through a sequence of differently sized layers ([`kernel.cu`](control-task/kernel.cu)); each layer launches a kernel that applies `tanh` to a `curand`-weighted sum and feeds its output into the next layer, timed with CUDA events. |
+| [`1-lab`](1-lab/kernel.cu) | Matrix multiplication | A 2D-grid `matrixMult` kernel ([`kernel.cu`](1-lab/kernel.cu)) multiplies two 211×211 integer matrices read from a file, verifies the result against a CPU reference, writes the output to a file, and times the kernel with `std::chrono`. |
+| [`2-lab`](2-lab/kernel.cu) | Animated function plot | A real-time GLUT/`CPUAnimBitmap` animation ([`kernel.cu`](2-lab/kernel.cu)) rendering the curve `tan(sin(x) + cos(x))`; thread/block dimensions are derived from the device's `maxThreadsPerBlock`, and each frame is rendered on the GPU and copied to the host bitmap. |
+| [`3-lab`](3-lab/kernel.cu) | Parallel reduction in shared memory | Computes six harmonic-style sums concurrently ([`kernel.cu`](3-lab/kernel.cu)) using `__shared__` per-block caches and a tree reduction with `__syncthreads`, then finishes the block-level sums on the host. |
+| [`4-lab`](4-lab/kernel.cu) | Constant vs. global memory | Runs the same array computation twice ([`kernel.cu`](4-lab/kernel.cu)), once reading coefficients from `__constant__` memory (`cudaMemcpyToSymbol`) and once from global memory, comparing their elapsed time via CUDA events. |
+| [`5-lab`](5-lab/kernel.cu) | Monte Carlo Pi (atomics) | Estimates Pi by sampling random points with `curand` and counting hits with `atomicAdd` ([`kernel.cu`](5-lab/kernel.cu)), offering an optimized (count points outside the circle) and an unoptimized variant, timed with CUDA events. |
+| [`control-task`](control-task/kernel.cu) | Multi-layer reduction pipeline | Passes a random array through a sequence of differently sized layers ([`kernel.cu`](control-task/kernel.cu)); each layer launches a kernel that applies `tanh` to a `curand`-weighted sum and feeds its output into the next layer, timed with CUDA events. |
 
 ## Tech stack
 
