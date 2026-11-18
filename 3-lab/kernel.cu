@@ -24,11 +24,12 @@ __global__ void calculateSums (
 	__shared__ baseType sumsCache[sumsAmount][THREADS_PER_BLOCK];
 	const int valIdx = threadIdx.x + blockIdx.x * blockDim.x;
 	const int cacheIdx = threadIdx.x;
-	if (valIdx >= ARRAY_LENGTH) return;
+	// threads past the array add zeros, but still reach __syncthreads
+	const bool inRange = valIdx < ARRAY_LENGTH;
 
 	const int val = valIdx + 1;
-	const baseType res1 = 1.0 / (baseType)val;
-	const baseType res2 = 1.0 / (ARRAY_LENGTH - valIdx);
+	const baseType res1 = inRange ? 1.0 / (baseType)val : 0.0;
+	const baseType res2 = inRange ? 1.0 / (ARRAY_LENGTH - valIdx) : 0.0;
 
 	sumsCache[0][cacheIdx] = res1;
 	sumsCache[1][cacheIdx] = res2;
@@ -95,10 +96,11 @@ int main() {
 
 	forEach((lambdaIterator)[&](int i) {
 		cudaFree(Ad[i]);
-		delete Ah[i];
+		delete[] Ah[i];
 	});
 
 	delete[] Ah;
+	delete[] Ad;
 
 	return 0;
 }

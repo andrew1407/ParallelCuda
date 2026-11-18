@@ -31,7 +31,8 @@ __global__ void kernel(unsigned char* ptr, int ticks)
 {
   int x = threadIdx.x + blockIdx.x * blockDim.x;
   int y = threadIdx.y + blockIdx.y * blockDim.y;
-  int offset = x + y * blockDim.x * gridDim.x;
+  if (x >= W || y >= H) return;     // the grid is rounded up past the bitmap edges
+  int offset = x + y * W;
   float c[3] = { 0.0, 0.5, -0.5 };
   bool lesserThanOne = false;
   for (float xDelta = -0.5; xDelta <= 0.5; xDelta += 0.5) {

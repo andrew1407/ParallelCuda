@@ -1,13 +1,13 @@
 // WebGPU port of kernelGlobal and kernelConst from 4-lab/kernel.cu.
-// __constant__ float constArrConst[16] becomes a uniform buffer; the global-memory copy is a
+// __constant__ float constArrConst[CONST_SIZE] becomes a uniform buffer; the global-memory copy is a
 // read-only storage buffer. The lab launches <<<1, ARR_SIZE>>>; when the device allows fewer
 // invocations per workgroup, the same threads are split over ARR_SIZE / WG workgroups.
 
 override ARR_SIZE: u32 = 512u;
 override WG: u32 = 512u;
 
-// uniform arrays need 16-byte elements, so the floats are packed four to a vec4.
-// 5 × 4 = 20 floats: the loop reads constArr[16], one past the lab's 16; it is 0 here.
+// uniform arrays need 16-byte elements, so the floats are packed four to a vec4:
+// 5 × 4 = 20 floats hold the CONST_SIZE = 17 coefficients.
 struct Constants { v: array<vec4<f32>, 5> }
 
 @group(0) @binding(0) var<storage, read> A: array<f32>;
@@ -27,6 +27,9 @@ fn kernelGlobal(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let fi = f32(i);
   B[i] = 0.0;
+  if (i == 0u) {
+    return; // the formula divides by i, so B[0] stays 0
+  }
   for (var u = 1u; u <= 15u; u += 2u) {
     B[i] += select(
       constArr[0] * A[i] * fi + constArr[15] * A[i] / fi,
@@ -44,6 +47,9 @@ fn kernelConst(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let fi = f32(i);
   B[i] = 0.0;
+  if (i == 0u) {
+    return; // the formula divides by i, so B[0] stays 0
+  }
   for (var u = 1u; u <= 15u; u += 2u) {
     B[i] += select(
       constAt(0u) * A[i] * fi + constAt(15u) * A[i] / fi,

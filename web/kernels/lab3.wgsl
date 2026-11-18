@@ -32,17 +32,11 @@ fn calculateSums(
   for (var threadIdx = lid.x; threadIdx < THREADS_PER_BLOCK; threadIdx += WG) {
     let valIdx = threadIdx + blockIdx.x * THREADS_PER_BLOCK;
     let cacheIdx = threadIdx;
-    // The lab returns here, before __syncthreads, and leaves these cache slots unset.
-    // Barriers must stay in uniform control flow in WGSL, so the thread writes zeros and stays.
-    if (valIdx >= ARRAY_LENGTH) {
-      for (var u = 0u; u < sumsAmount; u++) {
-        sumsCache[cache(u, cacheIdx)] = 0.0;
-      }
-      continue;
-    }
+    // threads past the array add zeros, but still reach the barrier
+    let inRange = valIdx < ARRAY_LENGTH;
     let val = valIdx + 1u;
-    let res1 = 1.0 / f32(val);
-    let res2 = 1.0 / f32(ARRAY_LENGTH - valIdx);
+    let res1 = select(0.0, 1.0 / f32(val), inRange);
+    let res2 = select(0.0, 1.0 / f32(ARRAY_LENGTH - valIdx), inRange);
 
     sumsCache[cache(0u, cacheIdx)] = res1;
     sumsCache[cache(1u, cacheIdx)] = res2;

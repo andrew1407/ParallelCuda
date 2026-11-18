@@ -19,7 +19,7 @@ __global__ void matrixMult(const BASE_TYPE* matrixA, const BASE_TYPE* matrixB, B
 	const int i = MATRIX_SIZE * (blockDim.y * blockIdx.y + threadIdx.y);
 	const int j = blockDim.x * blockIdx.x + threadIdx.x;
 	const int resIndex = MATRIX_SIZE * (blockDim.y * blockIdx.y + threadIdx.y) + blockDim.x * blockIdx.x + threadIdx.x;
-	if (i >= MATRIX_LENGTH || j >= MATRIX_LENGTH || resIndex >= MATRIX_LENGTH)
+	if (i >= MATRIX_LENGTH || j >= MATRIX_SIZE || resIndex >= MATRIX_LENGTH)
 		return;
 	BASE_TYPE resValue = 0;
 	for (int k = 0; k < MATRIX_SIZE; k++)
@@ -103,6 +103,7 @@ int main() {
 
 	auto start = chrono::high_resolution_clock::now();
 	matrixMult<<<dim3(MATRIX_SIZE, MATRIX_SIZE), 1>>>(matrixAd, matrixBd, matrixCd);
+	cudaDeviceSynchronize();								// wait for the kernel before stopping the timer
 	auto end = chrono::high_resolution_clock::now();
 
 	cudaMemcpy(matrixCh, matrixCd, allocatedMem, cudaMemcpyDeviceToHost);
@@ -114,7 +115,7 @@ int main() {
 			for (int k = 0; k < MATRIX_SIZE; k++)
 				sum += matrixAh[i * MATRIX_SIZE + k] * matrixBh[k * MATRIX_SIZE + j];
 			if (matrixCh[i * MATRIX_SIZE + j] != sum) {
-				cerr << "Result verification failed at element [" << i << ", " << j << "]!\nsum = " << sum << ", " << matrixCh << "[[i * Bcols + j] = " << matrixCh[i * MATRIX_SIZE + j] << endl;
+				cerr << "Result verification failed at element [" << i << ", " << j << "]!\nsum = " << sum << ", matrixCh[i * MATRIX_SIZE + j] = " << matrixCh[i * MATRIX_SIZE + j] << endl;
 				exit(EXIT_FAILURE);
 			}
 		}

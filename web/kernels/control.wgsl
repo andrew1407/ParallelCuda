@@ -50,7 +50,7 @@ fn layerKernel(
 ) {
   let blockDim = 1u;
   let i = threadIdx.x + blockIdx.x * blockDim;
-  var state = curand_init(f64_trunc_u32(sum), 0u);
+  var state = curand_init(f64_trunc_u32(sum) + i, 0u); // (unsigned long long)*sum + i
   let weight = curand_uniform_double(&state);
   let a = weight * f64_to_f32(sum) + 1.0;
   output[i] = func(a);

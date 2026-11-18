@@ -3,7 +3,7 @@
 #include <iostream>
 
 #define ARR_SIZE 512
-#define CONST_SIZE 16
+#define CONST_SIZE 17		// the loop reads constArr[0] .. constArr[16]
 #define SIZE_MEMORY(s) (s * sizeof(float))
 
 float* constArrGlobal;
@@ -13,6 +13,7 @@ __constant__ float constArrConst[CONST_SIZE];
 __global__ void kernelGlobal(float* A, float* B, float* constArr) {
 	const int i = threadIdx.x + blockIdx.x * blockDim.x;
 	B[i] = 0;
+	if (!i) return;		// the formula divides by i, so B[0] stays 0
 	for (int u = 1; u <= 15; u += 2)
 		B[i] += (i != 15) ?
 		(constArr[u] * A[i] / i - constArr[u + 1] * A[i] * i) :
@@ -22,6 +23,7 @@ __global__ void kernelGlobal(float* A, float* B, float* constArr) {
 __global__ void kernelConst(float* A, float* B) {
 	const int i = threadIdx.x + blockIdx.x * blockDim.x;
 	B[i] = 0;
+	if (!i) return;		// the formula divides by i, so B[0] stays 0
 	for (int u = 1; u <= 15; u += 2)
 		B[i] += (i != 15) ?
 		(constArrConst[u] * A[i] / i - constArrConst[u + 1] * A[i] * i) :

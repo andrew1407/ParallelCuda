@@ -15,7 +15,7 @@ __device__ double fn(double x) {
 __global__ void kernel(double* output, double* sum) {
 	int i = threadIdx.x + blockIdx.x * blockDim.x;
 	curandState_t state;
-	curand_init(*sum, 0, 0, &state);
+	curand_init((unsigned long long)*sum + i, 0, 0, &state);	// a seed per thread, so each draws its own weight
 	const double weight = curand_uniform_double(&state);
 	const double a = weight * (*sum) + 1.0;
 	output[i] = fn(a);
@@ -74,7 +74,7 @@ int main() {
 		cudaMemcpy(output_h, output_d, outputSize, cudaMemcpyDeviceToHost);
 
 		cudaFree(output_d);
-		cudaFree(&sum_d);
+		cudaFree(sum_d);
 
 		delete[] arrIterable;
 		arrIterable = output_h;

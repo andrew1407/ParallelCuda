@@ -86,8 +86,8 @@ export function lab3Cpu(len, blocks, tpb) {
   for (let b = 0; b < blocks; b++) {
     for (let t = 0; t < tpb; t++) {
       const valIdx = t + b * tpb;
-      if (valIdx >= len) { for (const c of cache) c[t] = 0; continue; }
-      const val = valIdx + 1, res1 = 1 / val, res2 = 1 / (len - valIdx);
+      const inRange = valIdx < len; // threads past the array add zeros
+      const val = valIdx + 1, res1 = inRange ? 1 / val : 0, res2 = inRange ? 1 / (len - valIdx) : 0;
       cache[0][t] = res1; cache[1][t] = res2;
       if (val % 2) { cache[2][t] = cache[4][t] = 0; cache[3][t] = res1; cache[5][t] = res2; }
       else { cache[3][t] = cache[5][t] = 0; cache[2][t] = res1; cache[4][t] = res2; }
@@ -102,10 +102,10 @@ export function lab3Cpu(len, blocks, tpb) {
 }
 
 // ------------------------------------------------------------------- lab 4 --
-// One run of execGlobal / execConst: 16 coefficients then ARR_SIZE values, from the same rand() stream.
+// One run of execGlobal / execConst: 17 coefficients then ARR_SIZE values, from the same rand() stream.
 export function lab4Input(rand, size) {
-  const c = new Float32Array(20); // 16 + the constArr[16] the loop reads past the end (0 here)
-  for (let i = 0; i < 16; i++) c[i] = rand() / RAND_MAX;
+  const c = new Float32Array(20); // CONST_SIZE = 17, padded to whole vec4s for the uniform buffer
+  for (let i = 0; i < 17; i++) c[i] = rand() / RAND_MAX;
   const A = new Float32Array(size);
   for (let i = 0; i < size; i++) A[i] = rand() / RAND_MAX;
   return { c, A };
@@ -114,6 +114,7 @@ export function lab4Cpu(A, c) {
   const f = Math.fround, B = new Float32Array(A.length);
   for (let i = 0; i < A.length; i++) {
     let b = 0;
+    if (i) // the formula divides by i, so B[0] stays 0
     for (let u = 1; u <= 15; u += 2)
       b = f(b + (i !== 15 ? f(f(f(c[u] * A[i]) / i) - f(f(c[u + 1] * A[i]) * i)) : f(f(f(c[0] * A[i]) * i) + f(f(c[15] * A[i]) / i))));
     B[i] = b;
@@ -143,17 +144,16 @@ export function controlInput(len, seed) {
   const rand = msvcRand(seed);
   return Float64Array.from({ length: len }, () => rand() / RAND_MAX);
 }
-// one layer: every thread seeds curand with (unsigned long long)sum, so all outputs come out equal
+// one layer: thread i seeds curand with (unsigned long long)sum + i
 export function controlLayer(sum, outLen) {
-  const out = new Float64Array(outLen);
-  let weight = 0;
+  const out = new Float64Array(outLen), weights = new Float64Array(outLen);
   for (let i = 0; i < outLen; i++) {
-    const [lo, hi] = seedOf(sum);
+    const [lo, hi] = seedOf(Math.trunc(sum) + i);
     const st = curandInit(lo, hi);
-    weight = curandUniformDouble(st);
-    out[i] = tanhLab(weight * sum + 1);
+    weights[i] = curandUniformDouble(st);
+    out[i] = tanhLab(weights[i] * sum + 1);
   }
-  return { out, weight, seed: Math.trunc(sum) };
+  return { out, weights, seed: Math.trunc(sum) };
 }
 export function controlCpu(input, layers) {
   let arr = input;

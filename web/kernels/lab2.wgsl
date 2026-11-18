@@ -24,17 +24,14 @@ fn func(x: f32) -> f32 {
 fn drawFrame(
   @builtin(workgroup_id) blockIdx: vec3<u32>,
   @builtin(local_invocation_id) threadIdx: vec3<u32>,
-  @builtin(num_workgroups) gridDim: vec3<u32>,
 ) {
   let blockDim = vec2<u32>(THREADS, THREADS);
   let x = i32(threadIdx.x + blockIdx.x * blockDim.x);
   let y = i32(threadIdx.y + blockIdx.y * blockDim.y);
-  let offset = x + y * i32(blockDim.x * gridDim.x);
-  // The grid overhangs the bitmap (ceil division) and the lab writes past its end there.
-  // Storage writes out of range are undefined here too, so those threads stop.
-  if (offset >= W * H) {
-    return;
+  if (x >= W || y >= H) {
+    return; // the grid is rounded up past the bitmap edges
   }
+  let offset = x + y * W;
   var lesserThanOne = false;
   for (var xDelta = -0.5; xDelta <= 0.5; xDelta += 0.5) {
     let cX = (f32(x) + xDelta) / f32(W) * (f32(MAXX) + f32(frame.ticks) * DT);

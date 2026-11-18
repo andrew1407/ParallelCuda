@@ -20,6 +20,7 @@ const range = (n, f = (i) => i) => Array.from({ length: n }, (_, i) => f(i));
 const pause = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 const stat = (value, label, cls = '') => `<div class="stat ${cls}"><b>${value}</b><span>${label}</span></div>`;
 const now = () => performance.now();
+const mean = (xs) => Array.from(xs).reduce((s, v) => s + v, 0) / xs.length;
 const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? (s[(s.length - 1) >> 1] + s[s.length >> 1]) / 2 : NaN; };
 const speedup = (g, c) => (g && c ? `${fmt(c / g, 2)}×` : '—');
 const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -132,7 +133,7 @@ const launch = (text) => stat(`<code>${esc(text)}</code>`, 'launch', 'launch');
 
 // ------------------------------------------------------------------- lab 1 --
 async function runLab1(p) {
-  const N = p.size, b = Number(p.block);
+  const N = p.size, b = 1;
   const { A, B } = cpu.lab1Input(N, p.seed);
   await pause();
   let t = now();
@@ -140,10 +141,10 @@ async function runLab1(p) {
   const cpuMs = now() - t;
   let Cgpu = null, gpuMs = null;
   if (await gpuReady) {
-    const pipe = await pipeline('lab1.wgsl', 'matrixMult', { MATRIX_SIZE: N, BLOCK: b });
+    const pipe = await pipeline('lab1.wgsl', 'matrixMult', { MATRIX_SIZE: N });
     const Ad = storage(A), Bd = storage(B), Cd = storage(A.byteLength);
     const group = bindGroup(pipe, { 0: Ad, 1: Bd, 2: Cd });
-    const grid = [Math.ceil(N / b), Math.ceil(N / b), 1];
+    const grid = [N, N, 1]; // <<<dim3(MATRIX_SIZE, MATRIX_SIZE), 1>>>
     submit([{ pipe, group, grid: [1, 1, 1] }]); await done(); // warm-up: first use of the pipeline
     t = now();
     submit([{ pipe, group, grid }]);
@@ -155,23 +156,19 @@ async function runLab1(p) {
   const C = Cgpu || Ccpu;
   let bad = null;
   if (Cgpu) for (let i = 0; i < N * N && !bad; i++) if (Cgpu[i] !== Ccpu[i]) bad = { i: Math.floor(i / N), j: i % N, sum: Ccpu[i], v: Cgpu[i] };
-  let wrong = 0;
-  if (Cgpu) for (let i = 0; i < N * N; i++) wrong += Cgpu[i] !== Ccpu[i];
-  return { N, b, A, B, C, Ccpu, gpuMs, cpuMs, bad, wrong };
+  return { N, A, B, C, Ccpu, gpuMs, cpuMs, bad };
 }
 
 const matrices = new Map();
 let matrixSeq = 0;
 function renderLab1(d, p) {
-  const grid = Math.ceil(d.N / d.b);
-  const conf = d.b === 1 ? `<<<dim3(${d.N}, ${d.N}), 1>>>` : `<<<dim3(${grid}, ${grid}), dim3(${d.b}, ${d.b})>>>`;
+  const conf = `<<<dim3(${d.N}, ${d.N}), 1>>>`;
   const console_ = d.bad
-    ? `Result verification failed at element [${d.bad.i}, ${d.bad.j}]!\nsum = ${d.bad.sum}, matrixCh[[i * Bcols + j] = ${d.bad.v}`
+    ? `Result verification failed at element [${d.bad.i}, ${d.bad.j}]!\nsum = ${d.bad.sum}, matrixCh[i * MATRIX_SIZE + j] = ${d.bad.v}`
     : `Calculated: ${fixed((gpuOk ? d.gpuMs : d.cpuMs) * 1e-3, 6)} seconds.`;
   const id = `m${++matrixSeq}`;
   matrices.set(id, { A: d.A, B: d.B, C: d.C, N: d.N, seed: p.seed });
-  const note = d.bad ? `<p class="note">${d.wrong} of ${d.N * d.N} elements are wrong. The lab's bounds check compares the column <code>j</code> with <code>MATRIX_LENGTH</code> instead of <code>MATRIX_SIZE</code>, so with ${d.b}×${d.b} blocks the threads past the last column (${d.N} isn't a multiple of ${d.b}) write into the start of the next row. The lab itself launches 1×1 blocks over an exact ${d.N}×${d.N} grid, where this never happens.</p>` : '';
-  return `${engineNote()}${note}
+  return `${engineNote()}
     <div class="stats">${timeStats(d.gpuMs, d.cpuMs)}${gpuOk ? verdict(!d.bad, 'C = A × B', 'mismatch') : ''}${launch(conf)}</div>
     <div class="two-col">
       <div data-copyable data-title="C = A × B, ${d.N}×${d.N}"><div class="copy-head"><h2>Result heatmap <small>· C, ${d.N}×${d.N}</small></h2>${actions('png')}</div><canvas class="heat" data-heat="${id}"></canvas><div class="legend"><span>low</span><span class="ramp"></span><span>high</span></div></div>
@@ -263,9 +260,7 @@ async function runLab2(p) {
 
 function renderLab2(d) {
   const conf = d.threads ? `<<<dim3(${d.blocks[0]}, ${d.blocks[1]}), dim3(${d.threads}, ${d.threads})>>>` : '—';
-  const over = d.blocks && (d.blocks[1] * d.threads > d.p.H || d.blocks[0] * d.threads > d.p.W);
   return `${engineNote()}
-    ${over ? `<p class="note">The grid is ${d.blocks[0] * d.threads}×${d.blocks[1] * d.threads} threads for a ${d.p.W}×${d.p.H} bitmap. The lab writes the extra rows past the end of the bitmap; the port skips them.</p>` : ''}
     <div class="stats">${stat(gpuOk ? msFmt(d.gpuMs) : 'n/a', 'GPU per frame')}${stat(msFmt(d.cpuMs), 'CPU per frame')}${gpuOk ? stat(speedup(d.gpuMs, d.cpuMs), 'GPU speed-up') : ''}${gpuOk ? stat(d.mismatch, `pixels differing in frame ${d.frames}`, d.mismatch / d.px.length < 0.01 ? 'good' : 'bad') : ''}${launch(conf)}</div>
     <div data-copyable data-title="tan(sin(x) + cos(x)), frame" class="anim-box">
       <div class="copy-head"><h2>Animation <small>· <span class="ticks"></span></small></h2>${actions('png')}</div>
@@ -419,12 +414,9 @@ async function runLab4(p) {
   return res;
 }
 function lab4Err(gpuB, cpuB) {
-  let max = 0, skipped = 0;
-  for (let i = 0; i < cpuB.length; i++) {
-    if (!Number.isFinite(cpuB[i])) { skipped++; continue; }
-    max = Math.max(max, Math.abs(gpuB[i] - cpuB[i]) / Math.max(1, Math.abs(cpuB[i])));
-  }
-  return { max, skipped };
+  let max = 0;
+  for (let i = 0; i < cpuB.length; i++) max = Math.max(max, Math.abs(gpuB[i] - cpuB[i]) / Math.max(1, Math.abs(cpuB[i])));
+  return { max };
 }
 function renderLab4(d) {
   const ran = !!d.B;
@@ -437,7 +429,7 @@ function renderLab4(d) {
   const rows = range(n, (i) => `<tr><td class="num">${i}</td><td class="num">${val(d.g.A[i])}</td><td class="num">${ran ? val(d.B.g[i]) : '—'}</td><td class="num">${val(d.ref.g[i])}</td><td class="num">${val(d.c.A[i])}</td><td class="num">${ran ? val(d.B.c[i]) : '—'}</td><td class="num">${val(d.ref.c[i])}</td></tr>`).join('');
   const runs = range(d.R, (i) => i + 1);
   return `${engineNote()}
-    <p class="note">Two quirks of the lab are kept. The loop reads <code>constArr[u + 1]</code> up to index 16, one past the 16 coefficients (0 here, whatever happens to follow in CUDA). And at <code>i = 0</code> it divides by zero, so <code>B[0]</code> is infinite; the check skips it.</p>
+    <p class="hint" style="margin:0 0 14px">The formula divides by <code>i</code>, so the kernel returns at <code>i = 0</code> and leaves <code>B[0]</code> at 0.</p>
     <div class="stats">${stat(gpuOk ? msFmt(mg) : 'n/a', 'global (storage), median run')}${stat(gpuOk ? msFmt(mc) : 'n/a', 'constant (uniform), median run')}${gpuOk ? stat(`${fmt(mg / mc, 3)}×`, 'global / constant') : ''}${stat(msFmt(d.cpuMs), 'CPU, one pass')}
       ${ran ? verdict(ok, 'both match CPU', 'mismatch') : ''}${launch(conf)}</div>
     ${gpuOk ? `<div class="charts">${chart({ title: `Run time: ${d.K} launches incl. upload and read-back`, x: 'run', y: 'time, ms', series: [{ name: 'global memory', xs: runs, ys: d.times.g, color: '--c2' }, { name: 'constant (uniform)', xs: runs, ys: d.times.c, color: '--c1' }] })}</div>` : ''}
@@ -566,27 +558,27 @@ function controlConsole(d, steps) {
 function renderControl(d) {
   const steps = d.steps || d.ref.steps;
   const diverged = d.steps ? d.steps.findIndex((s, i) => s.seed !== d.ref.steps[i].seed) : -1;
-  const allEqual = steps.every((s) => s.out.every((v) => v === s.out[0]));
   const outGpu = steps[steps.length - 1].out, outCpu = d.ref.output;
   const maxDiff = d.steps ? Math.max(...Array.from(outCpu, (v, i) => Math.abs(v - outGpu[i]))) : 0;
   const rows = steps.map((s, i) => {
-    const r = d.ref.steps[i], off = d.steps && s.seed !== r.seed;
-    return `<tr${off ? ' class="off"' : ''}><td class="num">${i + 1}</td><td class="num">${d.layers[i]} → ${d.layers[i + 1]}</td><td class="num">${s.sum.toFixed(7)}</td><td class="num">${s.seed}</td><td class="num">${fixed(s.out[0], 7)}</td><td class="num">${r.sum.toFixed(7)}</td><td class="num">${r.seed}</td><td class="num">${fixed(r.weight, 7)}</td><td class="num">${fixed(r.out[0], 7)}</td></tr>`;
+    const r = d.ref.steps[i], off = d.steps && s.seed !== r.seed, n = d.layers[i + 1];
+    const seeds = n > 1 ? `${s.seed} … ${s.seed + n - 1}` : `${s.seed}`;
+    return `<tr${off ? ' class="off"' : ''}><td class="num">${i + 1}</td><td class="num">${d.layers[i]} → ${n}</td><td class="num">${s.sum.toFixed(7)}</td><td class="num">${seeds}</td><td class="num">${fixed(mean(s.out), 7)}</td><td class="num">${r.sum.toFixed(7)}</td><td class="num">${fixed(mean(r.out), 7)}</td><td class="num">${d.steps ? fmt(Math.max(...Array.from(r.out, (v, k) => Math.abs(v - s.out[k]))), 2) : "—"}</td></tr>`;
   }).join('');
   const xs = range(steps.length, (i) => i + 1);
   const note = diverged >= 0
-    ? `<p class="note">The GPU path takes a different seed from layer ${diverged + 1}. Its outputs are f32, and <code>tanh</code> of a large argument rounds to exactly 1.0 in f32 but stays just below 1 in double. The host sum then lands on a whole number instead of just under it, so <code>(unsigned long long)sum</code>, the curand seed, is one higher, and every later layer follows another random weight.</p>`
+    ? `<p class="note">The GPU path takes a different seed from layer ${diverged + 1}. Its outputs are f32, and <code>tanh</code> of a large argument rounds to exactly 1.0 in f32 but stays just below 1 in double. The host sum then lands on a whole number instead of just under it, so <code>(unsigned long long)sum</code>, the curand seed, is one higher, and every later layer draws other random weights.</p>`
     : '';
   return `${engineNote()}${note}
-    <div class="stats">${stat(outGpu.every((v) => v === outGpu[0]) ? `${outGpu.length} × ${fixed(outGpu[0], 6)}` : Array.from(outGpu, (v) => fixed(v, 4)).join(', '), 'output array')}${timeStats(d.gpuMs, d.cpuMs)}${d.steps ? verdict(diverged < 0 && maxDiff < 1e-5, `max |Δ| ${fmt(maxDiff, 2)}`, diverged >= 0 ? `seed differs at layer ${diverged + 1}` : `max |Δ| ${fmt(maxDiff, 2)}`) : ''}${stat(allEqual ? 'all equal' : 'varied', 'outputs within a layer')}${launch(`${steps.length} layers × <<<n, 1>>>`)}</div>
-    <p class="hint" style="margin:-6px 0 14px">Every thread calls <code>curand_init(*sum, 0, 0)</code> with the same sum, so all threads draw the same weight and a layer's outputs are all equal.</p>
+    <div class="stats">${stat(outGpu.every((v) => v === outGpu[0]) ? `${outGpu.length} × ${fixed(outGpu[0], 6)}` : Array.from(outGpu, (v) => fixed(v, 4)).join(', '), 'output array')}${timeStats(d.gpuMs, d.cpuMs)}${d.steps ? verdict(diverged < 0 && maxDiff < 1e-5, `max |Δ| ${fmt(maxDiff, 2)}`, diverged >= 0 ? `seed differs at layer ${diverged + 1}` : `max |Δ| ${fmt(maxDiff, 2)}`) : ''}${launch(`${steps.length} layers × <<<n, 1>>>`)}</div>
+    <p class="hint" style="margin:-6px 0 14px">Thread <code>i</code> seeds curand with <code>(unsigned long long)sum + i</code>, so each output of a layer gets its own weight.</p>
     <div data-copyable data-title="Layer pipeline"><div class="copy-head"><h2>Pipeline <small>· one column per layer, cells shaded by value</small></h2>${actions('png')}</div><div class="plot layers-plot">${layersSvg(d, steps)}</div></div>
     <div class="charts two" style="margin-top:16px">
       ${chart({ title: 'Host sum fed into each layer', x: 'layer', y: 'sum', series: [{ name: 'GPU path', xs, ys: steps.map((s) => s.sum), color: '--c1' }, ...(d.steps ? [{ name: 'CPU f64', xs, ys: d.ref.steps.map((s) => s.sum), color: '--c2', dash: true }] : [])] })}
-      ${chart({ title: 'Layer output value tanh(weight · sum + 1)', x: 'layer', y: 'output', series: [{ name: 'GPU path', xs, ys: steps.map((s) => s.out[0]), color: '--c1' }, ...(d.steps ? [{ name: 'CPU f64', xs, ys: d.ref.steps.map((s) => s.out[0]), color: '--c2', dash: true }] : [])] })}
+      ${chart({ title: 'Mean layer output tanh(weight · sum + 1)', x: 'layer', y: 'mean output', series: [{ name: 'GPU path', xs, ys: steps.map((s) => mean(s.out)), color: '--c1' }, ...(d.steps ? [{ name: 'CPU f64', xs, ys: d.ref.steps.map((s) => mean(s.out)), color: '--c2', dash: true }] : [])] })}
     </div>
     <div data-copyable style="margin-top:16px"><div class="copy-head"><h2>Layers <small>· ${d.steps ? 'GPU path, then the CPU f64 reference' : 'CPU f64 reference'}</small></h2>${actions('table')}</div>
-      <div class="table-wrap"><table><thead><tr><th class="num">Layer</th><th class="num">Size</th><th class="num">sum</th><th class="num">seed</th><th class="num">output</th><th class="num">CPU sum</th><th class="num">CPU seed</th><th class="num">CPU weight</th><th class="num">CPU output</th></tr></thead><tbody>${rows}</tbody></table></div></div>
+      <div class="table-wrap"><table><thead><tr><th class="num">Layer</th><th class="num">Size</th><th class="num">sum</th><th class="num">seeds</th><th class="num">mean output</th><th class="num">CPU sum</th><th class="num">CPU mean output</th><th class="num">max |Δ|</th></tr></thead><tbody>${rows}</tbody></table></div></div>
     ${consoleBox(controlConsole(d, steps))}`;
 }
 function layersSvg(d, steps) {
@@ -608,10 +600,9 @@ const LABS = [
   {
     id: 'lab1', tab: '1', name: 'Matrix multiplication', dir: '1-lab',
     intro: 'Multiplies two 211×211 integer matrices with the <code>matrixMult</code> kernel: a 2D grid of 211×211 blocks with one thread each, every thread computing one element of C. The result is checked element by element against a CPU triple loop, as the lab does.',
-    port: 'The lab reads A and B from a file it first fills with <code>rand() % 1000</code>; here they come straight from the same generator (MSVC <code>rand()</code>, seed 1, since the lab never calls <code>srand</code>). The lab\'s <code>std::chrono</code> timer stops right after the asynchronous launch, so it only measures the launch; the GPU time here waits for the kernel to finish.',
+    port: 'The lab reads A and B from a file it first fills with <code>rand() % 1000</code>; here they come straight from the same generator (MSVC <code>rand()</code>, seed 1, since the lab never calls <code>srand</code>). Like the lab\'s timer, which stops after <code>cudaDeviceSynchronize()</code>, the GPU time waits for the kernel to finish.',
     fields: [
       { key: 'size', label: 'MATRIX_SIZE', value: 211, min: 2, max: 512 },
-      { key: 'block', label: 'Block', value: '1', options: [['1', '1×1 (lab)'], ['8', '8×8'], ['16', '16×16']] },
       { key: 'seed', label: 'srand seed', value: 1, min: 0, max: 4294967295 },
     ],
     run: runLab1, render: renderLab1,
@@ -649,12 +640,11 @@ const LABS = [
       { key: 'blocks', label: 'BLOCKS', value: 10, min: 1, max: 4096 },
       { key: 'tpb', label: 'THREADS_PER_BLOCK', value: '1024', options: ['64', '128', '256', '512', '1024'] },
     ],
-    hint: 'The lab\'s threads past ARRAY_LENGTH return before <code>__syncthreads()</code> and leave their cache slots unset, which the reduction still reads. The port writes zeros there instead, because WGSL barriers have to be reached by the whole workgroup.',
     run: runLab3, render: renderLab3,
   },
   {
     id: 'lab4', tab: '4', name: 'Constant vs global memory', dir: '4-lab',
-    intro: 'The same kernel runs twice on 512 random floats: once reading its 16 coefficients from global memory, once from <code>__constant__</code> memory filled with <code>cudaMemcpyToSymbol</code>. The lab times each run (allocate, copy, launch, copy back) with CUDA events.',
+    intro: 'The same kernel runs twice on 512 random floats: once reading its 17 coefficients from global memory, once from <code>__constant__</code> memory filled with <code>cudaMemcpyToSymbol</code>. The lab times each run (allocate, copy, launch, copy back) with CUDA events.',
     port: '<code>__constant__</code> becomes a uniform buffer and the global array a read-only storage buffer. A single 512-thread launch takes microseconds, so each run here launches the kernel many times to make the difference measurable.',
     fields: [
       { key: 'size', label: 'ARR_SIZE', value: 512, min: 16, max: 1048576 },
@@ -679,8 +669,8 @@ const LABS = [
   },
   {
     id: 'control', tab: 'CT', name: 'Multi-layer tanh pipeline', dir: 'control-task', title: 'Control task',
-    intro: 'A random array of 10 values goes through 10 layers of sizes 10, 20, 40, 60, 120, 120, 60, 40, 20 and 4. For each layer the host sums the previous output and launches one single-thread block per output; each thread seeds curand with the sum, draws a weight and writes tanh(weight · sum + 1).',
-    port: 'The kernel gets the host\'s double sum as its raw 64 bits: it truncates them exactly for the seed and rounds them to f32 for the arithmetic. <code>tanh</code> is the lab\'s own exp formula, in f32 with a clamp so <code>exp</code> can\'t overflow. The lab also frees <code>&amp;sum_d</code>, the host address of the pointer, so its device sum is never freed; the port frees it.',
+    intro: 'A random array of 10 values goes through 10 layers of sizes 10, 20, 40, 60, 120, 120, 60, 40, 20 and 4. For each layer the host sums the previous output and launches one single-thread block per output; thread <i>i</i> seeds curand with the sum plus <i>i</i>, draws a weight and writes tanh(weight · sum + 1).',
+    port: 'The kernel gets the host\'s double sum as its raw 64 bits: it truncates them exactly for the seed and rounds them to f32 for the arithmetic. <code>tanh</code> is the lab\'s own exp formula, in f32 with a clamp so <code>exp</code> can\'t overflow.',
     fields: [
       { key: 'len', label: 'ARR_LENGTH', value: 10, min: 1, max: 10000 },
       { key: 'layers', label: 'Layer sizes', value: '10, 20, 40, 60, 120, 120, 60, 40, 20, 4', type: 'text', wide: true },
