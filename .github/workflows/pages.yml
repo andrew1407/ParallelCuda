@@ -1,0 +1,42 @@
+name: Deploy showcase to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nothing to compile: the kernels are WGSL (web/kernels) that the browser builds through WebGPU.
+      # Mirror the repo layout so the page can load ../<lab>/kernel.cu for its code view.
+      - name: Assemble site
+        run: |
+          mkdir -p _site/web
+          cp web/*.html web/*.js web/*.svg _site/web/
+          cp -r web/kernels _site/web/
+          cp -r 1-lab 2-lab 3-lab 4-lab 5-lab control-task _site/
+          echo '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=./web/"><title>ParallelCuda Labs</title><link rel="icon" href="./web/icon.svg"><a href="./web/">Open the showcase</a>' > _site/index.html
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

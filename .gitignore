@@ -4,3 +4,6 @@
 *.ptx
 *.cubin
 *.fatbin
+
+# GitHub Pages build, assembled by .github/workflows/pages.yml
+_site/

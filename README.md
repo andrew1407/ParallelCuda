@@ -1,5 +1,13 @@
 # ParallelCuda
 
+<p align="center">
+  <a href="https://andrew1407.github.io/ParallelCuda/" title="Open the labs in the browser">
+    <img src="web/icon.svg" alt="ParallelCuda Labs" width="96" height="96">
+  </a>
+</p>
+
+[![pages deploy badge](https://github.com/andrew1407/ParallelCuda/actions/workflows/pages.yml/badge.svg)](https://andrew1407.github.io/ParallelCuda/)
+
 A collection of C++/CUDA parallel-computing labs that explore GPU and CPU calculation patterns, host-device data passing, and different CUDA memory and reduction techniques. Each lab is a standalone CUDA program with its own Visual Studio solution.
 
 ## Overview
@@ -16,6 +24,20 @@ Every lab follows the same host/device structure: the host (`__host__`) allocate
 | [`4-lab`](4-lab/kernel.cu) | Constant vs. global memory | Runs the same array computation twice ([`kernel.cu`](4-lab/kernel.cu)), once reading coefficients from `__constant__` memory (`cudaMemcpyToSymbol`) and once from global memory, comparing their elapsed time via CUDA events. |
 | [`5-lab`](5-lab/kernel.cu) | Monte Carlo Pi (atomics) | Estimates Pi by sampling random points with `curand` and counting hits with `atomicAdd` ([`kernel.cu`](5-lab/kernel.cu)), offering an optimized (count points outside the circle) and an unoptimized variant, timed with CUDA events. |
 | [`control-task`](control-task/kernel.cu) | Multi-layer reduction pipeline | Passes a random array through a sequence of differently sized layers ([`kernel.cu`](control-task/kernel.cu)); each layer launches a kernel that applies `tanh` to a `curand`-weighted sum and feeds its output into the next layer, timed with CUDA events. |
+
+## Showcase
+
+**[Open the labs in the browser](https://andrew1407.github.io/ParallelCuda/)**. Every lab runs with adjustable parameters, charts and drawings of its results, its console output in the lab's own format, and buttons to copy each chart (PNG or CSV), table, matrix (TSV) and set of results.
+
+CUDA can't run in a browser, so nothing here runs natively. Each kernel is **ported to a WebGPU compute shader** in [`web/kernels`](web/kernels), keeping its structure: the same grid and block sizes as workgroups, `__shared__` as `var<workgroup>`, `__syncthreads()` as `workgroupBarrier()`, `atomicAdd` on an `atomic<u32>`, `__constant__` as a uniform buffer (compared with a storage buffer in lab 4), and `curand` as a WGSL port of cuRAND's XORWOW generator. Random input comes from a copy of MSVC's `rand()` with the labs' default seed. A JavaScript CPU reference in [`web/cpu.js`](web/cpu.js) checks every GPU result and is timed against it. Without WebGPU the page runs the CPU reference only. WGSL has no 64-bit floats, so the labs' `double` math runs in f32 on the GPU. Each lab's page shows the original `.cu` next to its WGSL port.
+
+There's nothing to build. To run it locally, serve the repo root and open `/web/`:
+
+```sh
+python -m http.server     # then open http://localhost:8000/web/
+```
+
+The [pages workflow](.github/workflows/pages.yml) deploys it on every push to `main`.
 
 ## Tech stack
 
@@ -64,7 +86,10 @@ ParallelCuda/
 ├── 5-lab/            # Monte Carlo Pi with atomics
 │   ├── kernel.cu
 │   └── 5-lab.sln / 5-lab.vcxproj
-└── control-task/     # Multi-layer reduction pipeline
-    ├── kernel.cu
-    └── control-work.sln / control-work.vcxproj
+├── control-task/     # Multi-layer reduction pipeline
+│   ├── kernel.cu
+│   └── control-work.sln / control-work.vcxproj
+└── web/              # Browser showcase: WebGPU ports of the kernels (GitHub Pages)
+    ├── index.html, app.js, gpu.js, cpu.js
+    └── kernels/      # WGSL compute shaders
 ```
