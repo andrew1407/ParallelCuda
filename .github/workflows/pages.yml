@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Nothing to compile: the kernels are WGSL (web/kernels) that the browser builds through WebGPU.
+      # Nothing to compile: the kernels are WGSL and GLSL (web/kernels) that the browser builds through WebGPU or WebGL2.
       # Mirror the repo layout so the page can load ../<lab>/kernel.cu for its code view.
       - name: Assemble site
         run: |

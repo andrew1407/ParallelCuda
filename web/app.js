@@ -1,9 +1,10 @@
-// ParallelCuda showcase: each lab's CUDA kernel ported to a WebGPU compute shader (kernels/*.wgsl),
-// checked and timed against a JavaScript CPU reference (cpu.js). Without WebGPU the labs run
-// the CPU reference only.
+// ParallelCuda showcase: each lab's CUDA kernel ported to a WebGPU compute shader (kernels/*.wgsl)
+// and to WebGL2 fragment-shader GPGPU (kernels/*.glsl), checked and timed against a JavaScript CPU
+// reference (cpu.js). Auto picks WebGPU, then WebGL2, then the CPU reference alone.
 
 import * as cpu from './cpu.js';
 import { gpu, initGpu, wgslSource, pipeline, storage, uniform, bindGroup, submit, done, readback, download, free } from './gpu.js';
+import { gl, initGl, glslSource, program, texture, target, draw, finish, read, release, layout } from './gl.js';
 
 const REPO = 'https://github.com/Andrew1407/ParallelCuda';
 const SRC = `${REPO}/blob/main`;
@@ -45,9 +46,64 @@ const rgb = (hex) => { const h = hex.replace('#', ''); return [0, 2, 4].map((i) 
 const fixed = (v, d) => (Number.isFinite(v) ? v.toFixed(d) : v > 0 ? 'inf' : v < 0 ? '-inf' : 'nan');
 const coutNum = (v) => (Number.isFinite(v) ? String(+v.toPrecision(6)) : v > 0 ? 'inf' : 'nan');
 
-let gpuOk = false;
-const gpuReady = initGpu().then((ok) => { gpuOk = ok; showGpuStatus(); return ok; });
+// ------------------------------------------------------------- backends --
+// Auto runs WebGPU, else WebGL2, else the CPU reference alone; the switch (or ?gpu=webgpu|webgl|cpu|auto)
+// forces one. Each lab remembers its choice for the session; with a WebGPU adapter the default is Auto,
+// otherwise CPU. `choice` and `cur` belong to the run being rendered.
+const BACKENDS = { webgpu: 'WebGPU', webgl: 'WebGL2', cpu: 'CPU' };
+const CHOICES = { auto: 'Auto', ...BACKENDS };
+let queryChoice = new URLSearchParams(location.search).get('gpu');
+if (!(queryChoice in CHOICES)) queryChoice = null;
+let choice = 'cpu', detected = false;
+let gpuOk = false, cur = 'cpu';
+const offeredChoices = () => Object.keys(CHOICES).filter((v) => (v === 'webgpu' ? gpuOk : v === 'webgl' ? glOk : v === 'auto' ? gpuOk || glOk : true));
+const choiceKey = (id) => `pcuda-backend:${id}`;
+function choiceFor(id) {
+  const offered = offeredChoices();
+  let v = queryChoice;
+  if (!v) try { v = sessionStorage.getItem(choiceKey(id)); } catch {}
+  return offered.includes(v) ? v : gpuOk ? 'auto' : 'cpu';
+}
+const gpuReady = initGpu().then((ok) => (gpuOk = ok));
+// Creating a WebGL2 context can take a few hundred ms on a software renderer, so a worker checks for
+// WebGL2 with float render targets (glprobe.js) and the page's own context waits until a lab first runs on it.
+let glOk = false, glTried = false;
+const glReady = new Promise((resolve) => {
+  let w;
+  const end = (reason) => { gl.reason = reason; glOk = !reason; w?.terminate(); resolve(glOk); };
+  try {
+    w = new Worker(new URL('./glprobe.js', import.meta.url));
+    w.onmessage = ({ data }) => end(String(data || ''));
+    w.onerror = () => end('the WebGL2 check failed');
+  } catch (e) { end(`the WebGL2 check failed (${e.message || e})`); }
+});
+const ready = Promise.all([gpuReady, glReady]).then(() => { detected = true; showGpuStatus(); });
+function ensureGl() {
+  if (glOk && !glTried) { glTried = true; glOk = initGl(); showGpuStatus(); }
+  return glOk && !!gl.c;
+}
 const maxThreads = () => (gpuOk ? gpu.limits.maxComputeInvocationsPerWorkgroup : 0);
+const onGpu = () => cur !== 'cpu';
+const gpuName = () => BACKENDS[cur];
+// why a backend can't run a lab ('' if it can); asking about WebGL2 creates the page's context
+function cannot(backend, lab) {
+  if (backend === 'webgpu') return gpuOk ? '' : gpu.reason;
+  if (backend === 'webgl') {
+    if (!ensureGl()) return gl.reason || 'WebGL2 is unavailable';
+    if (lab?.glFloat && gl.c && !gl.float) return 'this WebGL2 has no float render targets (EXT_color_buffer_float)';
+  }
+  return '';
+}
+const cap = (t) => t.replace(/^./, (c) => c.toUpperCase());
+let fallbackWhy = '';
+function backendFor(lab) {
+  fallbackWhy = '';
+  if (choice === 'cpu') return 'cpu';
+  if (choice !== 'auto') { fallbackWhy = cannot(choice, lab); return fallbackWhy ? 'cpu' : choice; }
+  for (const b of ['webgpu', 'webgl']) if (!cannot(b, lab)) return b;
+  fallbackWhy = `${cannot('webgpu', lab)}, and ${cannot('webgl', lab)}`;
+  return 'cpu';
+}
 
 // ------------------------------------------------------------------ charts --
 const charts = new Map();
@@ -142,9 +198,14 @@ function drawChart(plot, spec) {
 }
 
 // ---------------------------------------------------------- GPU / CPU bits --
-const engineNote = () => (gpuOk ? '' : '<p class="note">WebGPU isn\'t available, so this ran the JavaScript CPU reference only.</p>');
+const engineNote = () => {
+  if (cur === 'webgl' && choice === 'auto') return `<p class="note">${esc(cap(cannot('webgpu')))}, so this ran the WebGL2 fragment-shader port.</p>`;
+  if (cur !== 'cpu') return '';
+  const why = !gpuOk && !glOk ? `${cap(gpu.reason)}, and ${gl.reason || 'WebGL2 is unavailable'}` : choice === 'cpu' ? 'CPU is selected' : cap(fallbackWhy);
+  return `<p class="note">${esc(why)}, so this ran the JavaScript CPU reference only.</p>`;
+};
 const verdict = (ok, good, bad) => stat(ok ? good : bad, 'verification', ok ? 'good' : 'bad');
-const timeStats = (g, c) => `${stat(gpuOk ? msFmt(g) : 'n/a', 'GPU (WebGPU)')}${stat(msFmt(c), 'CPU (JavaScript)')}${gpuOk ? stat(speedup(g, c), 'GPU speed-up') : ''}`;
+const timeStats = (g, c) => `${stat(onGpu() ? msFmt(g) : 'n/a', `GPU (${onGpu() ? gpuName() : 'none'})`)}${stat(msFmt(c), 'CPU (JavaScript)')}${onGpu() ? stat(speedup(g, c), 'GPU speed-up') : ''}`;
 const launch = (text) => stat(`<code>${esc(text)}</code>`, 'launch', 'launch');
 
 // ------------------------------------------------------------------- lab 1 --
@@ -154,7 +215,18 @@ async function runLab1(p) {
   const { C: Ccpu, ms: cpuMs } = await cpuRun('lab1', { A, B, N });
   let t;
   let Cgpu = null, gpuMs = null;
-  if (await gpuReady) {
+  if (cur === 'webgl') {
+    const prog = await program('lab1.glsl');
+    const Ad = texture(N, N, 'r32i', A), Bd = texture(N, N, 'r32i', B), Cd = texture(N, N, 'r32i'), fb = target(Cd);
+    const args = { tex: { matrixA: Ad, matrixB: Bd }, uni: { MATRIX_SIZE: ['1i', N] } };
+    draw(prog, fb, 1, 1, args); await finish(); // warm-up: first use of the program
+    t = now();
+    draw(prog, fb, N, N, args); // <<<dim3(MATRIX_SIZE, MATRIX_SIZE), 1>>>: one fragment per block
+    await finish();
+    gpuMs = now() - t;
+    Cgpu = await read(fb, N, N);
+    release(fb, Ad, Bd, Cd);
+  } else if (cur === 'webgpu') {
     const pipe = await pipeline('lab1.wgsl', 'matrixMult', { MATRIX_SIZE: N });
     const Ad = storage(A), Bd = storage(B), Cd = storage(A.byteLength);
     const group = bindGroup(pipe, { 0: Ad, 1: Bd, 2: Cd });
@@ -179,11 +251,11 @@ function renderLab1(d, p) {
   const conf = `<<<dim3(${d.N}, ${d.N}), 1>>>`;
   const console_ = d.bad
     ? `Result verification failed at element [${d.bad.i}, ${d.bad.j}]!\nsum = ${d.bad.sum}, matrixCh[i * MATRIX_SIZE + j] = ${d.bad.v}`
-    : `Calculated: ${fixed((gpuOk ? d.gpuMs : d.cpuMs) * 1e-3, 6)} seconds.`;
+    : `Calculated: ${fixed((onGpu() ? d.gpuMs : d.cpuMs) * 1e-3, 6)} seconds.`;
   const id = `m${++matrixSeq}`;
   matrices.set(id, { A: d.A, B: d.B, C: d.C, N: d.N, seed: p.seed });
   return `${engineNote()}
-    <div class="stats">${timeStats(d.gpuMs, d.cpuMs)}${gpuOk ? verdict(!d.bad, 'C = A × B', 'mismatch') : ''}${launch(conf)}</div>
+    <div class="stats">${timeStats(d.gpuMs, d.cpuMs)}${onGpu() ? verdict(!d.bad, 'C = A × B', 'mismatch') : ''}${launch(cur === 'webgl' ? `${conf} as one ${d.N}×${d.N} pass` : conf)}</div>
     <div class="two-col">
       <div data-copyable data-title="C = A × B, ${d.N}×${d.N}"><div class="copy-head"><h2>Result heatmap <small>· C, ${d.N}×${d.N}</small></h2>${actions('png')}</div><canvas class="heat" data-heat="${id}"></canvas><div class="legend"><span>low</span><span class="ramp"></span><span>high</span></div></div>
       <div data-copyable data-matrix="${id}" data-which="C" data-title="Matrix preview" style="min-width:0">
@@ -247,6 +319,20 @@ async function lab2Gpu(p) {
   };
 }
 
+async function lab2Gl(p) {
+  const prog = await program('lab2.glsl');
+  const tex = texture(p.W, p.H, 'rgba8'), fb = target(tex);
+  const uni = { W: ['1i', p.W], H: ['1i', p.H], MAXX: ['1i', p.MAXX], MAXY: ['1i', p.MAXY], MINY: ['1i', p.MINY], DT: ['1f', p.DT] };
+  return {
+    async render(ticks, px) {
+      draw(prog, fb, p.W, p.H, { uni: { ...uni, ticks: ['1i', ticks] } });
+      const rgba = await read(fb, p.W, p.H);
+      px.set(new Uint32Array(rgba.buffer));
+    },
+    free: () => release(fb, tex),
+  };
+}
+
 async function runLab2(p) {
   stopAnim();
   while (anim.busy) await new Promise((r) => setTimeout(r, 10)); // let an in-flight frame finish before freeing its buffers
@@ -256,8 +342,8 @@ async function runLab2(p) {
   const { px: pxCpu, ms: cpuMs } = await cpuRun('lab2Bench', { p, frames });
   let t;
   let g = null, gpuMs = null, mismatch = null;
-  if (await gpuReady) {
-    g = await lab2Gpu(p);
+  if (onGpu()) {
+    g = cur === 'webgl' ? await lab2Gl(p) : await lab2Gpu(p);
     await g.render(1, px); // warm-up
     t = now();
     for (let k = 1; k <= frames; k++) await g.render(k, px);
@@ -265,23 +351,23 @@ async function runLab2(p) {
     mismatch = 0;
     for (let i = 0; i < px.length; i++) mismatch += px[i] !== pxCpu[i];
   }
-  anim.ctx = { p, gpu: g, px, cpuMs, gpuMs };
+  anim.ctx = { p, gpu: g, px, cpuMs, gpuMs, backend: cur };
   anim.engine = g ? 'gpu' : 'cpu';
   anim.ticks = frames;
   return { p, frames, cpuMs, gpuMs, mismatch, threads: g?.threads, blocks: g?.blocks, px: g ? px : pxCpu };
 }
 
 function renderLab2(d) {
-  const conf = d.threads ? `<<<dim3(${d.blocks[0]}, ${d.blocks[1]}), dim3(${d.threads}, ${d.threads})>>>` : '—';
+  const conf = d.threads ? `<<<dim3(${d.blocks[0]}, ${d.blocks[1]}), dim3(${d.threads}, ${d.threads})>>>` : cur === 'webgl' ? `one ${d.p.W}×${d.p.H} pass per frame` : '—';
   return `${engineNote()}
-    <div class="stats">${stat(gpuOk ? msFmt(d.gpuMs) : 'n/a', 'GPU per frame')}${stat(msFmt(d.cpuMs), 'CPU per frame')}${gpuOk ? stat(speedup(d.gpuMs, d.cpuMs), 'GPU speed-up') : ''}${gpuOk ? stat(d.mismatch, `pixels differing in frame ${d.frames}`, d.mismatch / d.px.length < 0.01 ? 'good' : 'bad') : ''}${launch(conf)}</div>
+    <div class="stats">${stat(onGpu() ? msFmt(d.gpuMs) : 'n/a', `GPU (${onGpu() ? gpuName() : 'none'}) per frame`)}${stat(msFmt(d.cpuMs), 'CPU per frame')}${onGpu() ? stat(speedup(d.gpuMs, d.cpuMs), 'GPU speed-up') : ''}${onGpu() ? stat(d.mismatch, `pixels differing in frame ${d.frames}`, d.mismatch / d.px.length < 0.01 ? 'good' : 'bad') : ''}${launch(conf)}</div>
     <div data-copyable data-title="tan(sin(x) + cos(x)), frame" class="anim-box">
       <div class="copy-head"><h2>Animation <small>· <span class="ticks"></span></small></h2>${actions('png')}</div>
       <div class="anim-controls">
         <button type="button" class="mini play">Pause</button>
         <button type="button" class="mini step">Step</button>
         <button type="button" class="mini restart">Restart</button>
-        <div class="seg" role="radiogroup" aria-label="Renderer">${[['gpu', 'GPU'], ['cpu', 'CPU']].map(([v, t]) => `<label><input type="radio" name="engine" value="${v}"${v === anim.engine ? ' checked' : ''}${v === 'gpu' && !gpuOk ? ' disabled' : ''}>${t}</label>`).join('')}</div>
+        ${onGpu() ? computeSwitch('engine', 'Renderer', [['gpu', `${ICON.gpu}GPU<span class="cs-chip">${gpuName()}</span>`], ['cpu', `${ICON.cpu}CPU`]], anim.engine) : ''}
         <span class="muted fps"></span>
       </div>
       <canvas class="bitmap" width="${d.p.W}" height="${d.p.H}"></canvas>
@@ -308,7 +394,7 @@ async function drawTick(box) {
   $('.ticks', box).textContent = `ticks = ${anim.ticks}, x from 0 to ${fmt(p.MAXX + anim.ticks * p.DT, 2)}`;
   anim.frames++;
   if (now() - anim.fpsT > 500) { anim.fps = (anim.frames * 1000) / (now() - anim.fpsT); anim.frames = 0; anim.fpsT = now(); }
-  $('.fps', box).textContent = `${anim.engine.toUpperCase()} · ${fmt(anim.last, 2)} ms per frame · ${Math.round(anim.fps)} fps`;
+  $('.fps', box).textContent = `${anim.engine === 'gpu' ? `GPU (${BACKENDS[c.backend]})` : 'CPU'} · ${fmt(anim.last, 2)} ms per frame · ${Math.round(anim.fps)} fps`;
 }
 function loop(box) {
   if (!anim.playing) return;
@@ -321,7 +407,7 @@ function bindLab2(out) {
   $('.play', box).onclick = () => (anim.playing ? stopAnim() : startAnim(box));
   $('.step', box).onclick = () => { stopAnim(); anim.ticks++; drawTick(box); };
   $('.restart', box).onclick = () => { anim.ticks = 1; if (!anim.playing) drawTick(box); };
-  box.querySelectorAll('input[name=engine]').forEach((r) => (r.onchange = () => { anim.engine = r.value; anim.fpsT = now(); anim.frames = 0; }));
+  box.querySelectorAll('input[name=engine]').forEach((r) => (r.onchange = () => { syncSwitch(r); anim.engine = r.value; anim.fpsT = now(); anim.frames = 0; }));
   blit($('canvas', box), anim.ctx.px, anim.ctx.p.W, anim.ctx.p.H);
   startAnim(box);
 }
@@ -339,8 +425,31 @@ async function runLab3(p) {
   const { len, blocks } = p, tpb = Number(p.tpb);
   const { ref, ms: cpuMs } = await cpuRun('lab3', { len, blocks, tpb });
   let t;
-  let parts = null, gpuMs = null, wg = null, gpuSkip = '';
-  if (await gpuReady) {
+  let parts = null, gpuMs = null, wg = null, gpuSkip = '', passes = 0;
+  if (cur === 'webgl' && Math.max(tpb, blocks) > gl.maxTex) gpuSkip = `The cache texture would be ${tpb}×${blocks} and this WebGL2 allows ${gl.maxTex}×${gl.maxTex}, so only the CPU reference ran.`;
+  else if (cur === 'webgl') {
+    const init = await program('lab3.glsl', { INIT: 1 }), step = await program('lab3.glsl', { REDUCE: 1 });
+    const tex = range(2, () => [texture(tpb, blocks, 'rgba32f'), texture(tpb, blocks, 'rgba32f')]);
+    const fbs = tex.map((t) => target(...t));
+    const launchAll = () => {
+      draw(init, fbs[0], tpb, blocks, { uni: { THREADS_PER_BLOCK: ['1ui', tpb], ARRAY_LENGTH: ['1ui', len] } });
+      let s = 0, n = 1;
+      for (let i = tpb >> 1; i; i >>= 1, n++) { // one pass per __syncthreads() of the tree
+        draw(step, fbs[1 - s], i, blocks, { tex: { src0: tex[s][0], src1: tex[s][1] }, uni: { i: ['1i', i] } });
+        s = 1 - s;
+      }
+      return [s, n];
+    };
+    launchAll(); await finish(); // warm-up
+    t = now();
+    const [s, n] = launchAll();
+    passes = n;
+    const [c0, c1] = [await read(fbs[s], 1, blocks, 0), await read(fbs[s], 1, blocks, 1)];
+    gpuMs = now() - t;
+    parts = range(6, () => new Float32Array(blocks));
+    for (let b = 0; b < blocks; b++) for (let u = 0; u < 6; u++) parts[u][b] = (u < 4 ? c0 : c1)[b * 4 + (u % 4)];
+    release(...fbs, ...tex.flat());
+  } else if (cur === 'webgpu') {
     wg = Math.min(tpb, maxThreads());
     const need = 6 * tpb * 4, have = gpu.limits.maxComputeWorkgroupStorageSize;
     if (need > have) gpuSkip = `The kernel needs ${need} bytes of shared memory per block and this GPU allows ${have}, so only the CPU reference ran.`;
@@ -357,7 +466,7 @@ async function runLab3(p) {
     }
   }
   const sums = parts ? parts.map((a) => a.reduce((s, v) => s + v, 0)) : ref.sums; // host loop in double
-  return { len, blocks, tpb, wg, parts, ref, sums, gpuMs, cpuMs, gpuSkip };
+  return { len, blocks, tpb, wg, parts, ref, sums, gpuMs, cpuMs, gpuSkip, passes };
 }
 function lab3Console(s) {
   const f = (v) => fixed(v, 30);
@@ -368,14 +477,15 @@ function renderLab3(d) {
   const covered = Math.min(d.len, d.blocks * d.tpb);
   const rel = d.sums.map((v, i) => Math.abs(v - d.ref.sums[i]) / Math.abs(d.ref.sums[i] || 1));
   const maxRel = Math.max(...rel);
-  const conf = `<<<${d.blocks}, ${d.tpb}>>>` + (d.wg && d.wg < d.tpb ? ` as ${d.blocks} × ${d.wg} invocations` : '');
+  const conf = `<<<${d.blocks}, ${d.tpb}>>>` + (d.wg && d.wg < d.tpb ? ` as ${d.blocks} × ${d.wg} invocations` : '') + (d.passes ? ` as ${d.passes} passes` : '');
   const rows = SUMS.map(([n, f, note], i) => `<tr><td><span class="sw" style="background:var(--c${i + 1})"></span><b>${n}</b></td><td>${f}</td><td class="num">${ran ? d.sums[i].toFixed(10) : '—'}</td><td class="num">${d.ref.sums[i].toFixed(15)}</td><td class="num">${ran ? fmt(rel[i], 3) : '—'}</td><td class="muted">${note}</td></tr>`).join('');
   return `${engineNote()}${d.gpuSkip ? `<p class="note">${esc(d.gpuSkip)}</p>` : ''}
     ${covered < d.len ? `<p class="note">${d.blocks} × ${d.tpb} threads cover only the first ${covered} of ${d.len} terms; the rest are left out, as in the lab.</p>` : ''}
+    ${d.passes ? `<p class="hint" style="margin:0 0 14px">WebGL2: the shared cache is a ${d.tpb}×${d.blocks} float texture, one row per block, and each of the ${d.passes - 1} reduction steps is a pass of its own, so the sums add in the kernel's order.</p>` : ''}
     ${d.wg && d.wg < d.tpb ? `<p class="note">This GPU runs at most ${d.wg} invocations per workgroup, so each invocation plays ${d.tpb / d.wg} of the block's ${d.tpb} threads. The shared cache and the reduction tree stay the same.</p>` : ''}
     <div class="stats">${stat(d.sums[0].toFixed(6), 'A')}${stat(d.sums[1].toFixed(6), 'B')}${stat((d.sums[2] + d.sums[3]).toFixed(6), 'C = C1 + C2')}${stat((d.sums[4] + d.sums[5]).toFixed(6), 'D = D1 + D2')}
       ${timeStats(d.gpuMs, d.cpuMs)}${ran ? verdict(maxRel < 1e-5, `rel. error ${fmt(maxRel, 2)}`, `rel. error ${fmt(maxRel, 2)}`) : ''}${launch(conf)}</div>
-    <div data-copyable><div class="copy-head"><h2>Six sums <small>· GPU in f32 (WGSL has no double), CPU in f64 like the lab</small></h2>${actions('table')}</div>
+    <div data-copyable><div class="copy-head"><h2>Six sums <small>· GPU in f32 (WGSL and GLSL have no double), CPU in f64 like the lab</small></h2>${actions('table')}</div>
       <div class="table-wrap"><table><thead><tr><th>Sum</th><th>Terms</th><th class="num">GPU (f32)</th><th class="num">CPU (f64)</th><th class="num">rel. error</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>
     <div class="charts" style="margin-top:16px">${chart({ title: 'Per-block partial sums (what each block writes back)', x: 'block', y: 'partial sum', series: SUMS.map(([n], i) => ({ name: n, xs: range(d.blocks), ys: Array.from((d.parts || d.ref.parts)[i]), color: `--c${i + 1}` })) })}</div>
     ${consoleBox(lab3Console(d.sums))}`;
@@ -388,7 +498,8 @@ async function runLab4(p) {
   const g = cpu.lab4Input(rand, size), c = cpu.lab4Input(rand, size); // execGlobal, then execConst
   const { ms: cpuMs, ref } = await cpuRun('lab4', { g, c, K });
   const res = { size, K, R, g, c, ref, cpuMs, wg: null, times: { g: [], c: [] }, B: null };
-  if (!(await gpuReady)) return res;
+  if (cur === 'webgl') return lab4Gl(res);
+  if (cur !== 'webgpu') return res;
   const wg = Math.min(size, maxThreads());
   res.wg = wg;
   const grid = [Math.ceil(size / wg), 1, 1];
@@ -420,6 +531,38 @@ async function runLab4(p) {
   res.B = B;
   return res;
 }
+async function lab4Gl(res) {
+  const { size, K, R, g, c } = res, [W, H] = layout(size);
+  const pg = await program('lab4.glsl'), pc = await program('lab4.glsl', { KERNEL_CONST: 1 });
+  const pad = (a) => { const out = new Float32Array(W * H); out.set(a); return out; };
+  // one run, like the lab's cudaEvent bracket: upload A (and the coefficients), K passes, read B back
+  const once = async (kind) => {
+    const isG = kind === 'g', data = isG ? g : c;
+    const t0 = now();
+    const Ad = texture(W, H, 'r32f', pad(data.A)), Bd = texture(W, H, 'r32f'), fb = target(Bd);
+    const cd = isG ? texture(20, 1, 'r32f', data.c) : null;
+    const args = isG
+      ? { tex: { A: Ad, constArr: cd }, uni: { ARR_SIZE: ['1i', size], W: ['1i', W] } }
+      : { tex: { A: Ad }, uni: { ARR_SIZE: ['1i', size], W: ['1i', W], constArrConst: ['1fv', data.c.subarray(0, 17)] } }; // cudaMemcpyToSymbol
+    for (let k = 0; k < K; k++) draw(isG ? pg : pc, fb, W, H, args);
+    const B = (await read(fb, W, H)).subarray(0, size);
+    const ms = now() - t0;
+    release(fb, Ad, Bd, cd);
+    return { ms, B };
+  };
+  await once('g'); await once('c'); // warm-up
+  const B = {};
+  for (let r = 0; r < R; r++) {
+    for (const kind of r % 2 ? ['c', 'g'] : ['g', 'c']) {
+      const o = await once(kind);
+      res.times[kind].push(o.ms);
+      B[kind] = o.B;
+    }
+  }
+  res.B = B;
+  res.grid = [W, H];
+  return res;
+}
 function lab4Err(gpuB, cpuB) {
   let max = 0;
   for (let i = 0; i < cpuB.length; i++) max = Math.max(max, Math.abs(gpuB[i] - cpuB[i]) / Math.max(1, Math.abs(cpuB[i])));
@@ -430,29 +573,53 @@ function renderLab4(d) {
   const mg = median(d.times.g), mc = median(d.times.c);
   const eg = ran ? lab4Err(d.B.g, d.ref.g) : null, ec = ran ? lab4Err(d.B.c, d.ref.c) : null;
   const ok = ran && eg.max < 1e-4 && ec.max < 1e-4;
-  const conf = d.wg ? `<<<${Math.ceil(d.size / d.wg)}, ${d.wg}>>> × ${d.K}` : '—';
+  const conf = d.wg ? `<<<${Math.ceil(d.size / d.wg)}, ${d.wg}>>> × ${d.K}` : d.grid ? `${d.grid[0]}×${d.grid[1]} pass × ${d.K}` : '—';
+  const glob = cur === 'webgl' ? 'texture' : 'storage';
   const n = Math.min(20, d.size);
   const val = (v) => (Number.isFinite(v) ? v.toPrecision(7) : String(v));
   const rows = range(n, (i) => `<tr><td class="num">${i}</td><td class="num">${val(d.g.A[i])}</td><td class="num">${ran ? val(d.B.g[i]) : '—'}</td><td class="num">${val(d.ref.g[i])}</td><td class="num">${val(d.c.A[i])}</td><td class="num">${ran ? val(d.B.c[i]) : '—'}</td><td class="num">${val(d.ref.c[i])}</td></tr>`).join('');
   const runs = range(d.R, (i) => i + 1);
   return `${engineNote()}
     <p class="hint" style="margin:0 0 14px">The formula divides by <code>i</code>, so the kernel returns at <code>i = 0</code> and leaves <code>B[0]</code> at 0.</p>
-    <div class="stats">${stat(gpuOk ? msFmt(mg) : 'n/a', 'global (storage), median run')}${stat(gpuOk ? msFmt(mc) : 'n/a', 'constant (uniform), median run')}${gpuOk ? stat(`${fmt(mg / mc, 3)}×`, 'global / constant') : ''}${stat(msFmt(d.cpuMs), 'CPU, one pass')}
+    <div class="stats">${stat(onGpu() ? msFmt(mg) : 'n/a', `global (${glob}), median run`)}${stat(onGpu() ? msFmt(mc) : 'n/a', 'constant (uniform), median run')}${onGpu() ? stat(`${fmt(mg / mc, 3)}×`, 'global / constant') : ''}${onGpu() ? stat(gpuName(), 'GPU backend') : ''}${stat(msFmt(d.cpuMs), 'CPU, one pass')}
       ${ran ? verdict(ok, 'both match CPU', 'mismatch') : ''}${launch(conf)}</div>
-    ${gpuOk ? `<div class="charts">${chart({ title: `Run time: ${d.K} launches incl. upload and read-back`, x: 'run', y: 'time, ms', series: [{ name: 'global memory', xs: runs, ys: d.times.g, color: '--c2' }, { name: 'constant (uniform)', xs: runs, ys: d.times.c, color: '--c1' }] })}</div>` : ''}
+    ${onGpu() ? `<div class="charts">${chart({ title: `${gpuName()} run time: ${d.K} launches incl. upload and read-back`, x: 'run', y: 'time, ms', series: [{ name: cur === 'webgl' ? 'global (texture)' : 'global memory', xs: runs, ys: d.times.g, color: '--c2' }, { name: 'constant (uniform)', xs: runs, ys: d.times.c, color: '--c1' }] })}</div>` : ''}
     <div data-copyable style="margin-top:16px"><div class="copy-head"><h2>First ${n} elements <small>· execGlobal and execConst draw their own data from one rand() stream</small></h2>${actions('table')}</div>
       <div class="table-wrap"><table><thead><tr><th class="num">i</th><th class="num">A (global)</th><th class="num">B global, GPU</th><th class="num">B global, CPU</th><th class="num">A (const)</th><th class="num">B const, GPU</th><th class="num">B const, CPU</th></tr></thead><tbody>${rows}</tbody></table></div></div>
-    ${consoleBox(gpuOk ? `Global: ${coutNum(d.times.g[0])} ms.\nConstant: ${coutNum(d.times.c[0])} ms.` : `CPU: ${coutNum(d.cpuMs)} ms.`)}`;
+    ${consoleBox(onGpu() ? `Global: ${coutNum(d.times.g[0])} ms.\nConstant: ${coutNum(d.times.c[0])} ms.` : `CPU: ${coutNum(d.cpuMs)} ms.`)}`;
 }
 
 // ------------------------------------------------------------------- lab 5 --
 async function runLab5(p) {
   const { len, blocks, threads } = p;
-  if (gpuOk && threads > maxThreads()) throw new Error(`This GPU allows at most ${maxThreads()} threads per workgroup.`);
+  if (cur === 'webgpu' && threads > maxThreads()) throw new Error(`This GPU allows at most ${maxThreads()} threads per workgroup.`);
   const { opt, unopt, series } = await cpuRun('lab5', { len });
   const out = { series };
   for (const [key, e] of [['opt', opt], ['unopt', unopt]]) out[key] = { ...e, gpu: null, gpuMs: null };
-  if (await gpuReady) {
+  if (cur === 'webgl') {
+    // T fragments run the grid-stride loop; threads past ARR_LENGTH would count nothing, so they're left out
+    const T = blocks * threads, [W, H] = layout(Math.min(T, len));
+    if (Math.max(W, H) > gl.maxTex) throw new Error(`The thread grid would be ${W}×${H} texels and this WebGL2 allows ${gl.maxTex}.`);
+    const sum = await program('reduce.glsl');
+    for (const [key, reversed] of [['opt', 1], ['unopt', 0]]) {
+      const prog = await program('lab5.glsl', { REVERSED: reversed });
+      const levels = [[W, H]];
+      while (levels.at(-1)[0] > 1 || levels.at(-1)[1] > 1) { const [w, h] = levels.at(-1); levels.push([Math.ceil(w / 2), Math.ceil(h / 2)]); }
+      const texs = levels.map(([w, h]) => texture(w, h, 'r32ui')), fbs = texs.map((t) => target(t));
+      const launchAll = () => {
+        draw(prog, fbs[0], W, H, { uni: { ARR_LENGTH: ['1ui', len], blockSize: ['1ui', T], W: ['1ui', W] } });
+        for (let l = 1; l < levels.length; l++) draw(sum, fbs[l], ...levels[l], { tex: { src: texs[l - 1] }, uni: { size: ['2i', ...levels[l - 1]] } });
+      };
+      launchAll(); await finish(); // warm-up
+      const t = now();
+      launchAll();
+      await finish();
+      out[key].gpuMs = now() - t;
+      out[key].gpu = (await read(fbs.at(-1), 1, 1))[0];
+      out[key].passes = levels.length;
+      release(...fbs, ...texs);
+    }
+  } else if (cur === 'webgpu') {
     for (const [key, entry] of [['opt', 'kernelOptimized'], ['unopt', 'kernelUnoptimized']]) {
       const pipe = await pipeline('lab5.wgsl', entry, { ARR_LENGTH: len, THREADS: threads });
       const counter = storage(new Uint32Array(1));
@@ -479,14 +646,15 @@ function lab5Console(d, key, src, ms) {
   return `${key === 'opt' ? 'Optimized' : 'Unoptimized'}:\n PI (c var.): ${PI.toFixed(26)}\n PI result: ${pi.toFixed(26)}\n Defference: ${Math.abs(PI - pi).toFixed(26)}\n Ratio: ${(PI / pi).toFixed(26)}\n Time: ${fixed(ms, 6)} ms.`;
 }
 function renderLab5(d) {
-  const src = gpuOk ? 'gpu' : 'cpu';
+  const src = onGpu() ? 'gpu' : 'cpu';
   const card = (key, title, what) => {
-    const e = d[key], pi = piOf(d, key, src), diff = gpuOk ? Math.abs(e.gpu - e.cpu) : 0;
-    return `<div class="panel" style="margin:0;padding:14px"><h2 style="margin-bottom:8px">${title} <small>· ${what}</small></h2><div class="stats" style="margin:0">${stat(pi.toFixed(6), 'π estimate')}${stat(fmt(Math.abs(Math.PI - pi), 3), '|π − estimate|')}${stat(`${(src === 'gpu' ? e.gpu : e.cpu).toLocaleString('en')}`, 'atomicAdd calls')}${stat(gpuOk ? msFmt(e.gpuMs) : 'n/a', 'GPU kernel')}${stat(msFmt(e.cpuMs), 'CPU')}${gpuOk ? stat(diff ? `${diff} points` : 'same count', 'GPU vs CPU', diff <= d.len * 1e-4 ? 'good' : 'bad') : ''}</div></div>`;
+    const e = d[key], pi = piOf(d, key, src), diff = onGpu() ? Math.abs(e.gpu - e.cpu) : 0;
+    return `<div class="panel" style="margin:0;padding:14px"><h2 style="margin-bottom:8px">${title} <small>· ${what}</small></h2><div class="stats" style="margin:0">${stat(pi.toFixed(6), 'π estimate')}${stat(fmt(Math.abs(Math.PI - pi), 3), '|π − estimate|')}${stat(`${(src === 'gpu' ? e.gpu : e.cpu).toLocaleString('en')}`, cur === 'webgl' ? 'points counted' : 'atomicAdd calls')}${stat(onGpu() ? msFmt(e.gpuMs) : 'n/a', `GPU (${onGpu() ? gpuName() : 'none'}) kernel`)}${stat(msFmt(e.cpuMs), 'CPU')}${onGpu() ? stat(diff ? `${diff} points` : 'same count', 'GPU vs CPU', diff <= d.len * 1e-4 ? 'good' : 'bad') : ''}</div></div>`;
   };
   const { xs, ys } = d.series;
   return `${engineNote()}
     <div class="algo-cards">${card('opt', 'Optimized', 'counts the points outside the circle')}${card('unopt', 'Unoptimized', 'counts the points inside')}</div>
+    ${cur === 'webgl' ? `<p class="hint" style="margin:0 0 14px">WebGL2 has no atomics: each of the ${(d.blocks * d.threads).toLocaleString('en')} threads is a fragment that counts its own points, and ${d.opt.passes - 1} reduction passes add the counts up exactly instead of <code>atomicAdd</code>.</p>` : ''}
     <div class="stats">${launch(`<<<${d.blocks}, ${d.threads}>>>, ${d.len} points`)}</div>
     <div class="two-col">
       <div data-copyable data-title="Monte Carlo points"><div class="copy-head"><h2>Sample points <small>· ${Math.min(d.len, 80000).toLocaleString('en')} of the unit square</small></h2>${actions('png')}</div><canvas class="scatter" width="720" height="720"></canvas>
@@ -519,9 +687,16 @@ async function runControl(p) {
   const { ref, ms: cpuMs } = await cpuRun('control', { input, layers });
   let t;
   let steps = null, gpuMs = null;
-  if (await gpuReady) {
-    const pipe = await pipeline('control.wgsl', 'layerKernel');
-    const layer = async (sum, outLen) => {
+  if (onGpu()) {
+    const pipe = cur === 'webgl' ? await program('control.glsl') : await pipeline('control.wgsl', 'layerKernel');
+    const layer = cur === 'webgl' ? async (sum, outLen) => {
+      const [W, H] = layout(outLen), outD = texture(W, H, 'r32f'), fb = target(outD);
+      const [lo, hi] = new Uint32Array(new Float64Array([sum]).buffer); // the double's raw bits
+      draw(pipe, fb, W, H, { uni: { sum: ['2ui', lo, hi], W: ['1i', W] } });
+      const out = (await read(fb, W, H)).slice(0, outLen);
+      release(fb, outD);
+      return out;
+    } : async (sum, outLen) => {
       const sumD = storage(new Float64Array([sum]));
       const outD = storage(outLen * 4);
       submit([{ pipe, group: bindGroup(pipe, { 0: outD, 1: sumD }), grid: [outLen, 1, 1] }]);
@@ -549,7 +724,7 @@ const parseLayers = (s) => String(s).split(/[\s,;]+/).filter(Boolean).map(Number
 function controlConsole(d, steps) {
   const show = (a) => Array.from(a, (v) => fixed(v, 6)).join('\n');
   const last = steps[steps.length - 1].out;
-  return `Input array:\n${show(d.input)}\nOutput array:\n${show(last)}\n\nDuration: ${fixed(gpuOk ? d.gpuMs : d.cpuMs, 6)} ms.`;
+  return `Input array:\n${show(d.input)}\nOutput array:\n${show(last)}\n\nDuration: ${fixed(onGpu() ? d.gpuMs : d.cpuMs, 6)} ms.`;
 }
 function renderControl(d) {
   const steps = d.steps || d.ref.steps;
@@ -610,6 +785,7 @@ const LABS = [
       { key: 'size', label: 'MATRIX_SIZE', value: 211, min: 2, max: 512 },
       { key: 'seed', label: 'srand seed', value: 1, min: 0, max: 4294967295 },
     ],
+    gl: 'A and B are R32I textures and C a render target; the 211×211 grid of one-thread blocks becomes one 211×211 pass, a fragment per element. Integer math, so the result must match exactly.',
     run: runLab1, render: renderLab1,
     after: (out) => {
       out.querySelectorAll('[data-matrix]').forEach((box) => {
@@ -634,6 +810,7 @@ const LABS = [
       { key: 'frames', label: 'Benchmark frames', value: 30, min: 1, max: 600 },
     ],
     hint: 'Run renders the benchmark frames on the GPU and on the CPU, compares the last frame pixel by pixel, then keeps animating.',
+    gl: 'A fragment per pixel draws into an RGBA8 texture, read back each frame through a pixel buffer.',
     run: runLab2, render: renderLab2, after: bindLab2,
   },
   {
@@ -645,6 +822,8 @@ const LABS = [
       { key: 'blocks', label: 'BLOCKS', value: 10, min: 1, max: 4096 },
       { key: 'tpb', label: 'THREADS_PER_BLOCK', value: '1024', options: ['64', '128', '256', '512', '1024'] },
     ],
+    gl: 'A fragment shader has no shared memory or barriers, so the cache is a float texture with one row per block and each step of the tree reduction is its own pass: the same additions in the same order.',
+    glFloat: true,
     run: runLab3, render: renderLab3,
   },
   {
@@ -657,6 +836,8 @@ const LABS = [
       { key: 'runs', label: 'Runs', value: 10, min: 1, max: 100 },
       { key: 'seed', label: 'srand seed', value: 1, min: 0, max: 4294967295 },
     ],
+    gl: 'The constant coefficients become a uniform array and the global copy a float texture read with <code>texelFetch</code>; one pass per launch.',
+    glFloat: true,
     run: runLab4, render: renderLab4,
   },
   {
@@ -668,6 +849,7 @@ const LABS = [
       { key: 'blocks', label: 'BLOCKS', value: 60, min: 1, max: 65535 },
       { key: 'threads', label: 'THREADS', value: 256, min: 1, max: 1024 },
     ],
+    gl: 'Each fragment is one thread of the grid and runs the same grid-stride loop with the same per-point curand XORWOW states. There are no atomics, so each thread writes its own count and reduction passes add them up exactly.',
     run: runLab5, render: renderLab5,
     after: (out, d) => out.querySelectorAll('canvas.scatter').forEach((c) => drawScatter(c, d.len)),
     theme: (out, d) => out.querySelectorAll('canvas.scatter').forEach((c) => drawScatter(c, d.len)),
@@ -681,6 +863,8 @@ const LABS = [
       { key: 'layers', label: 'Layer sizes', value: '10, 20, 40, 60, 120, 120, 60, 40, 20, 4', type: 'text', wide: true },
       { key: 'seed', label: 'srand seed', value: 1, min: 0, max: 4294967295 },
     ],
+    gl: 'One pass per layer, a fragment per output, with the same curand seeding from the double\'s raw bits.',
+    glFloat: true,
     run: runControl, render: renderControl,
   },
 ];
@@ -788,7 +972,7 @@ function resultsText(sec) {
   const lab = LABS.find((l) => `panel-${l.id}` === sec.id);
   const p = params(lab);
   const lines = [`${labTitle(lab)}: ${lab.name}`, `Parameters: ${lab.fields.map((f) => `${f.label} = ${p[f.key]}`).join(', ')}`,
-    `Engine: ${gpuOk ? `WebGPU (${gpu.info}) and the JavaScript CPU reference` : 'JavaScript CPU reference (no WebGPU)'}`];
+    `Engine: ${{ webgpu: `WebGPU (${gpu.info}) and the JavaScript CPU reference`, webgl: `WebGL2 (${gl.info}) and the JavaScript CPU reference`, cpu: 'JavaScript CPU reference only' }[state.get(lab.id).backend || 'cpu']}`];
   const out = $('.out', sec);
   out.querySelectorAll('.big, .note').forEach((el) => lines.push(el.innerText.trim()));
   out.querySelectorAll('.stats').forEach((st) => {
@@ -848,10 +1032,11 @@ document.addEventListener('click', (e) => { const b = e.target.closest('button[d
 // -------------------------------------------------------------- code view --
 const CU_KW = /\b(__global__|__device__|__host__|__shared__|__constant__|__syncthreads|atomicAdd|threadIdx|blockIdx|blockDim|gridDim|cudaMalloc|cudaMemcpy|cudaMemcpyToSymbol|cudaFree|cudaMemset|cudaEvent\w*|curand\w*|dim3)\b/;
 const WG_KW = /\b(var<workgroup>|workgroupBarrier|atomicAdd|atomic|@compute|@workgroup_size|@builtin|@group|@binding|override|uniform|storage)\b/;
-const C_KW = /\b(if|else|for|while|return|const|let|var|fn|struct|int|unsigned|char|bool|float|double|void|typedef|true|false|auto|new|delete|sizeof|continue|break|u32|i32|f32|vec2|vec3|vec4|array|ptr|select|using|namespace|include|define)\b/;
+const GL_KW = /\b(uniform|out|in|inout|layout|texelFetch|gl_FragCoord|sampler2D|isampler2D|usampler2D|uintBitsToFloat|precision|highp)\b/;
+const C_KW = /\b(if|else|for|while|return|const|let|var|fn|struct|int|unsigned|char|bool|float|double|void|typedef|true|false|auto|new|delete|sizeof|continue|break|u32|i32|f32|vec2|vec3|vec4|array|ptr|select|using|namespace|include|define|uint|ivec2|uvec2|ifdef|endif)\b/;
 function highlight(code, lang) {
   const re = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*")|(^[ \t]*#\w+)|(@\w+|var<\w+>|\b[A-Za-z_]\w*\b)|(\b\d[\d.]*(?:e-?\d+)?[uUfiL]*\b|\b0x[\da-fA-F]+u?\b)/gm;
-  const special = lang === 'cu' ? CU_KW : WG_KW;
+  const special = lang === 'cu' ? CU_KW : lang === 'glsl' ? GL_KW : WG_KW;
   let out = '', last = 0;
   for (const m of code.matchAll(re)) {
     out += esc(code.slice(last, m.index));
@@ -863,13 +1048,13 @@ function highlight(code, lang) {
   return out + esc(code.slice(last));
 }
 const CODE = {
-  lab1: ['1-lab/kernel.cu', 'lab1.wgsl'], lab2: ['2-lab/kernel.cu', 'lab2.wgsl'], lab3: ['3-lab/kernel.cu', 'lab3.wgsl'],
-  lab4: ['4-lab/kernel.cu', 'lab4.wgsl'], lab5: ['5-lab/kernel.cu', 'lab5.wgsl'], control: ['control-task/kernel.cu', 'control.wgsl'],
+  lab1: ['1-lab/kernel.cu', 'lab1.wgsl', 'lab1.glsl'], lab2: ['2-lab/kernel.cu', 'lab2.wgsl', 'lab2.glsl'], lab3: ['3-lab/kernel.cu', 'lab3.wgsl', 'lab3.glsl'],
+  lab4: ['4-lab/kernel.cu', 'lab4.wgsl', 'lab4.glsl'], lab5: ['5-lab/kernel.cu', 'lab5.wgsl', 'lab5.glsl'], control: ['control-task/kernel.cu', 'control.wgsl', 'control.glsl'],
 };
 async function loadCode(det, lab) {
   if (det.dataset.loaded) return;
   det.dataset.loaded = '1';
-  const [cu, wgsl] = CODE[lab.id];
+  const [cu, wgsl, glsl] = CODE[lab.id];
   const fill = async (sel, getText, lang) => {
     const pre = $(sel, det);
     try { pre.innerHTML = highlight((await getText()).replace(/^﻿/, '').replace(/\t/g, '    '), lang); }
@@ -878,20 +1063,25 @@ async function loadCode(det, lab) {
   await Promise.all([
     fill('.cu pre', async () => { const r = await fetch(`../${cu}`); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); }, 'cu'),
     fill('.wg pre', () => wgslSource(wgsl), 'wgsl'),
+    fill('.gls pre', async () => (await glslSource(glsl)) + (lab.id === 'lab5' ? `\n\n// ---- reduce.glsl\n${await glslSource('reduce.glsl')}` : ''), 'glsl'),
   ]);
 }
 const codeView = (lab) => {
-  const [cu, wgsl] = CODE[lab.id];
-  return `<details class="code"><summary>Kernel source: the CUDA original next to its WGSL port</summary>
+  const [cu, wgsl, glsl] = CODE[lab.id];
+  const port = (cls, file, shown) => `<div class="${cls}" data-copyable${shown ? '' : ' hidden'}><div class="copy-head"><h2><a href="${SRC}/web/kernels/${file}" target="_blank" rel="noopener">web/kernels/${file}</a></h2>${actions('code')}</div><pre class="src">Loading…</pre></div>`;
+  return `<details class="code"><summary>Kernel source: the CUDA original next to its WGSL and GLSL ports</summary>
     <div class="code-grid">
       <div class="cu" data-copyable><div class="copy-head"><h2><a href="${SRC}/${cu}" target="_blank" rel="noopener">${cu}</a></h2>${actions('code')}</div><pre class="src">Loading…</pre></div>
-      <div class="wg" data-copyable><div class="copy-head"><h2><a href="${SRC}/web/kernels/${wgsl}" target="_blank" rel="noopener">web/kernels/${wgsl}</a></h2>${actions('code')}</div><pre class="src">Loading…</pre></div>
+      <div class="ports"><div class="tabs" role="tablist" aria-label="Port">${[['wg', 'WGSL · WebGPU'], ['gls', 'GLSL · WebGL2']].map(([k, t], i) => `<button type="button" class="tab" data-port="${k}" aria-selected="${!i}">${t}</button>`).join('')}</div>
+        ${port('wg', wgsl, true)}${port('gls', glsl, false)}</div>
     </div></details>`;
 };
 
 // --------------------------------------------------------------- framework --
 const nav = $('#nav'), main = $('#labs');
-const state = new Map(); // lab id -> { ran, running, data }
+const state = new Map(); // lab id -> { ran, running, data, backend }
+// one lab runs at a time: the backend in `cur` belongs to the run in progress
+let runChain = Promise.resolve();
 
 function fieldHtml(lab, f) {
   const id = `${lab.id}-${f.key}`;
@@ -906,16 +1096,16 @@ function build() {
     const b = document.createElement('button');
     b.type = 'button'; b.role = 'tab'; b.dataset.lab = lab.id;
     b.setAttribute('aria-controls', `panel-${lab.id}`);
-    b.innerHTML = `<span class="lang cu">CU</span>${lab.title || `Lab ${lab.tab}`}<span class="long muted" style="font-weight:400">· ${esc(lab.name)}</span>`;
+    b.innerHTML = `<span class="lang cu">CU</span><span class="gpu-badge" title="Has a WebGPU / WebGL2 mode">GPU</span>${lab.title || `Lab ${lab.tab}`}<span class="long muted" style="font-weight:400">· ${esc(lab.name)}</span>`;
     b.onclick = () => select(lab.id, true);
     nav.appendChild(b);
 
     const sec = document.createElement('section');
     sec.className = 'panel'; sec.id = `panel-${lab.id}`; sec.role = 'tabpanel'; sec.hidden = true;
-    sec.innerHTML = `<div class="lab-head"><span class="lang cu">CUDA → WGSL</span><h3>${labTitle(lab)}: ${esc(lab.name)}</h3><a href="${SRC}/${lab.dir}/kernel.cu" target="_blank" rel="noopener">View source</a></div>
+    sec.innerHTML = `<div class="lab-head"><span class="lang cu">CUDA → WGSL · GLSL</span><h3>${labTitle(lab)}: ${esc(lab.name)}</h3><a href="${SRC}/${lab.dir}/kernel.cu" target="_blank" rel="noopener">View source</a></div>
       <p class="intro">${lab.intro}</p>
-      <p class="port"><b>Ported to WebGPU</b> because CUDA can't run in a browser. ${lab.port}</p>
-      <form class="params" novalidate>${lab.fields.map((f) => fieldHtml(lab, f)).join('')}<button class="run" type="submit">Run</button></form>
+      <p class="port"><b>Ported to WebGPU</b> because CUDA can't run in a browser. ${lab.port}<br><b>WebGL2 fallback:</b> ${lab.gl}</p>
+      <form class="params" novalidate>${lab.fields.map((f) => fieldHtml(lab, f)).join('')}${computeField(lab)}<button class="run" type="submit">Run</button></form>
       ${lab.hint ? `<p class="hint">${lab.hint}</p>` : ''}
       <div class="out" style="margin-top:18px"></div>
       ${codeView(lab)}`;
@@ -924,6 +1114,10 @@ function build() {
 
     $('form', sec).addEventListener('submit', (e) => { e.preventDefault(); run(lab); });
     const det = $('details.code', sec);
+    det.querySelectorAll('[data-port]').forEach((b) => (b.onclick = () => {
+      det.querySelectorAll('[data-port]').forEach((x) => x.setAttribute('aria-selected', x === b));
+      det.querySelectorAll('.ports > [data-copyable]').forEach((x) => (x.hidden = !x.classList.contains(b.dataset.port)));
+    }));
     det.addEventListener('toggle', () => det.open && loadCode(det, lab));
   }
 }
@@ -950,7 +1144,7 @@ function invalid(lab, p) {
 
 async function run(lab) {
   const st = state.get(lab.id);
-  if (st.running) return;
+  if (st.running) { st.again = true; return; }
   const sec = $(`#panel-${lab.id}`), btn = $('.run', sec), out = $('.out', sec);
   const p = params(lab);
   const bad = invalid(lab, p);
@@ -959,10 +1153,18 @@ async function run(lab) {
   btn.disabled = true; btn.textContent = 'Running…';
   out.style.opacity = '.45';
   const t0 = now(), tick = setInterval(() => (btn.textContent = `Running… ${Math.floor((now() - t0) / 1000)}s`), 1000);
+  let release_;
+  const turn = runChain;
+  runChain = new Promise((r) => (release_ = r));
   try {
+    await turn;
+    await ready;
+    choice = choiceFor(lab.id);
+    cur = backendFor(lab);
     const data = await lab.run(p);
     out.innerHTML = `<div class="out-actions">${actions('results')}</div>` + lab.render(data, p);
     st.data = data;
+    st.backend = cur;
     await nextFrame(); // let the browser lay the new results out in a task of its own, then draw into them
     drawCharts(out);
     lab.after?.(out, data);
@@ -970,8 +1172,10 @@ async function run(lab) {
     console.error(e);
     out.innerHTML = `<div class="err">${esc(e.message || e)}</div>`;
   } finally {
+    release_();
     clearInterval(tick);
     st.running = false; btn.disabled = false; btn.textContent = 'Run'; out.style.opacity = '';
+    if (st.again) { st.again = false; run(lab); }
   }
 }
 
@@ -989,6 +1193,7 @@ function select(id, push) {
   if (push) try { history.replaceState(null, '', `#${lab.id}`); } catch {}
   document.title = `${labTitle(lab)} · ParallelCuda Labs`;
   if (lab.id !== 'lab2') stopAnim();
+  if (detected) showGpuStatus();
   if (!state.get(lab.id).ran) run(lab);
   else {
     drawCharts($(`#panel-${lab.id}`));
@@ -996,17 +1201,58 @@ function select(id, push) {
   }
 }
 
+const svg = (body, fill = 'none') => `<svg viewBox="0 0 16 16" fill="${fill}" stroke="${fill === 'none' ? 'currentColor' : 'none'}" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">${body}</svg>`;
+const ICON = {
+  cpu: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2"/><rect x="6.5" y="6.5" width="3" height="3" fill="currentColor" stroke="none"/><path d="M6 1.5V4M10 1.5V4M6 12v2.5M10 12v2.5M1.5 6H4M1.5 10H4M12 6h2.5M12 10h2.5"/></svg>',
+  gpu: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="4" width="13" height="7.5" rx="1.2"/><circle cx="10.5" cy="7.75" r="2"/><path d="M4 6.5h2.5M4 9h2.5M3 11.5V14M6 11.5V14"/></svg>',
+};
+// the shared .compute-switch: a pill radiogroup whose thumb slides to the checked index (--i)
+function computeSwitch(name, label, opts, checked, cls = '') {
+  const i = Math.max(0, opts.findIndex(([v]) => v === checked));
+  return `<div class="compute-switch${cls}" role="radiogroup" aria-label="${label}" style="--n:${opts.length};--i:${i}">${opts.map(([v, html], k) => `<label><input type="radio" name="${name}" value="${v}"${k === i ? ' checked' : ''}>${html}</label>`).join('')}</div>`;
+}
+function syncSwitch(input) {
+  const sw = input.closest('.compute-switch');
+  sw.style.setProperty('--i', [...sw.querySelectorAll('input')].indexOf(input));
+}
+const currentLab = () => LABS.find((l) => l.id === location.hash.slice(1)) || LABS[0];
+
+// The compute switch in every lab's form: GPU (WebGPU, else WebGL2) first, then CPU. Until the GPU check is
+// done it shows CPU, dimmed and inert; without any GPU backend it's hidden. ?gpu=webgpu|webgl still forces one.
+const GPU_TIP = "Runs the lab's kernel ported to the GPU and checks it against the CPU reference";
+const computeField = (lab) => `<div class="field compute" data-mode-field><span id="${lab.id}-compute-label">Compute</span><div class="compute-switch cs-pending" role="radiogroup" aria-labelledby="${lab.id}-compute-label" style="--n:2;--i:1">`
+  + `<label title="${GPU_TIP}"><input type="radio" name="${lab.id}-compute" value="auto" disabled>${ICON.gpu}GPU<span class="cs-chip"></span></label>`
+  + `<label title="The JavaScript CPU reference only"><input type="radio" name="${lab.id}-compute" value="cpu" checked disabled>${ICON.cpu}CPU</label></div></div>`;
 function showGpuStatus() {
-  const el = $('#gpu-status');
-  if (gpuOk) {
-    const l = gpu.limits;
-    el.className = 'gpu-status ok-box';
-    el.innerHTML = `<b>WebGPU</b> on ${esc(gpu.info)} · up to ${l.maxComputeInvocationsPerWorkgroup} threads per workgroup, ${l.maxComputeWorkgroupStorageSize / 1024} KB of workgroup memory. Every lab runs its kernel on the GPU and checks it against the CPU.`;
-  } else {
-    el.className = 'gpu-status warn-box';
-    el.innerHTML = `<b>No WebGPU:</b> ${esc(gpu.reason)}. The labs run their JavaScript CPU reference only. A recent Chrome or Edge, or Safari 26 and later, runs the GPU kernels.`;
+  if (!detected) return;
+  const any = gpuOk || glOk, name = gpuOk ? 'WebGPU' : 'WebGL2';
+  const info = gpuOk ? `WebGPU on ${gpu.info}` : glOk && gl.info ? `WebGL2 on ${gl.info}` : 'WebGL2';
+  for (const lab of LABS) {
+    const sec = $(`#panel-${lab.id}`), field = $('[data-mode-field]', sec), sw = $('.compute-switch', field);
+    if (!any) { field.hidden = true; continue; }
+    const c = choiceFor(lab.id), gpuIn = $('input[value="auto"]', sw), cpuIn = $('input[value="cpu"]', sw);
+    gpuIn.disabled = cpuIn.disabled = false;
+    $('.cs-chip', sw).textContent = c === 'webgl' ? 'WebGL2' : c === 'webgpu' ? 'WebGPU' : name;
+    gpuIn.closest('label').title = `${GPU_TIP} (${info})`;
+    (c === 'cpu' ? cpuIn : gpuIn).checked = true;
+    syncSwitch(c === 'cpu' ? cpuIn : gpuIn);
+    if (!field.dataset.wired) {
+      field.dataset.wired = '1';
+      sw.querySelectorAll('input').forEach((r) => (r.onchange = () => { syncSwitch(r); setChoice(r.value); }));
+      requestAnimationFrame(() => requestAnimationFrame(() => sw.classList.remove('cs-pending')));
+    } else sw.classList.remove('cs-pending');
   }
-  el.hidden = false;
+}
+function setChoice(v) {
+  const lab = currentLab();
+  try { sessionStorage.setItem(choiceKey(lab.id), v); } catch {}
+  if (queryChoice) {
+    // the choice made here wins over ?gpu= from now on, also after a reload
+    queryChoice = null;
+    try { const u = new URL(location.href); u.searchParams.delete('gpu'); history.replaceState(null, '', u); } catch {}
+  }
+  state.get(lab.id).ran = false;
+  run(lab);
 }
 
 build();

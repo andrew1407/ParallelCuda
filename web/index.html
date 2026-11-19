@@ -6,11 +6,11 @@
   <title>ParallelCuda Labs</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <script src="theme.js"></script>
-  <meta name="description" content="Run the ParallelCuda labs in your browser: each CUDA kernel ported to a WebGPU compute shader with the same grid, shared memory, barriers and atomics, checked and timed against a JavaScript CPU reference.">
+  <meta name="description" content="Run the ParallelCuda labs in your browser: each CUDA kernel ported to a WebGPU compute shader with the same grid, shared memory, barriers and atomics, with a WebGL2 fragment-shader fallback, checked and timed against a JavaScript CPU reference.">
   <style>
     :root {
       --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #5d6673; --line: #dfe3e8; --grid: #eceff3;
-      --accent: #3557d6; --accent-ink: #ffffff; --soft: #eef1fb; --err: #c0362c; --err-soft: #fdecea; --ok: #1f8a4c; --ok-soft: #e3f4ea;
+      --accent: #3557d6; --accent-ink: #ffffff; --on-accent: var(--accent-ink); --gpu-badge: #1f8a4c; --gpu-soft: #e3f4ea; --soft: #eef1fb; --err: #c0362c; --err-soft: #fdecea; --ok: #1f8a4c; --ok-soft: #e3f4ea;
       --c1: #3557d6; --c2: #d4731f; --c3: #1f8a4c; --c4: #8152c2; --c5: #c0362c; --c6: #1d8ea3; --c7: #b8971b;
       --cu: #4f8a10; --cu-soft: #e6f2d8; --code-kw: #8152c2; --code-gp: #1f8a4c; --code-st: #b35c12; --code-cm: #6e7781; --code-nu: #1d6fa3;
       --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -19,7 +19,7 @@
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
         --bg: #111418; --panel: #191d23; --ink: #e6e9ee; --muted: #9aa4b2; --line: #2b313a; --grid: #222830;
-        --accent: #7c97ff; --accent-ink: #0d1117; --soft: #1f2636; --err: #ff7b72; --err-soft: #3a1d1c; --ok: #4fd18b; --ok-soft: #16301f;
+        --accent: #7c97ff; --accent-ink: #0d1117; --soft: #1f2636; --err: #ff7b72; --err-soft: #3a1d1c; --ok: #4fd18b; --ok-soft: #16301f; --gpu-badge: #4fd18b; --gpu-soft: #16301f;
         --c1: #7c97ff; --c2: #f0a050; --c3: #4fd18b; --c4: #b48cf0; --c5: #ff7b72; --c6: #4cc4d8; --c7: #e0c050;
         --cu: #8fd14f; --cu-soft: #1f3314; --code-kw: #c09cf5; --code-gp: #5fd394; --code-st: #f0a868; --code-cm: #8b949e; --code-nu: #79c0ff;
         color-scheme: dark;
@@ -27,7 +27,7 @@
     }
     :root[data-theme="dark"] {
       --bg: #111418; --panel: #191d23; --ink: #e6e9ee; --muted: #9aa4b2; --line: #2b313a; --grid: #222830;
-      --accent: #7c97ff; --accent-ink: #0d1117; --soft: #1f2636; --err: #ff7b72; --err-soft: #3a1d1c; --ok: #4fd18b; --ok-soft: #16301f;
+      --accent: #7c97ff; --accent-ink: #0d1117; --soft: #1f2636; --err: #ff7b72; --err-soft: #3a1d1c; --ok: #4fd18b; --ok-soft: #16301f; --gpu-badge: #4fd18b; --gpu-soft: #16301f;
       --c1: #7c97ff; --c2: #f0a050; --c3: #4fd18b; --c4: #b48cf0; --c5: #ff7b72; --c6: #4cc4d8; --c7: #e0c050;
       --cu: #8fd14f; --cu-soft: #1f3314; --code-kw: #c09cf5; --code-gp: #5fd394; --code-st: #f0a868; --code-cm: #8b949e; --code-nu: #79c0ff;
       color-scheme: dark;
@@ -65,11 +65,6 @@
     .field.wide input { width: 220px; }
     .field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
     .field.radio { flex-direction: row; gap: 4px; }
-    .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-    .seg label { padding: 7px 11px; font-size: 14px; color: var(--muted); cursor: pointer; }
-    .seg input { position: absolute; opacity: 0; pointer-events: none; }
-    .seg label:has(input:checked) { background: var(--soft); color: var(--ink); }
-    .seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
     .run { padding: 8px 20px; border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-weight: 600; }
     .run:disabled { opacity: .5; cursor: wait; }
     .hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
@@ -127,6 +122,15 @@
     .gpu-status { border-radius: 10px; padding: 9px 14px; margin: 0 0 16px; font-size: 14px; border: 1px solid; }
     .ok-box { border-color: color-mix(in srgb, var(--ok) 45%, transparent); background: var(--ok-soft); }
     .warn-box { border-color: var(--c2); background: color-mix(in srgb, var(--c2) 12%, transparent); }
+    .gpu-status p { margin: 6px 0 0; }
+    .backend-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .backend-row > span { font-weight: 600; }
+    .gpu-status.pending > p { color: var(--muted); }
+    nav.labs .gpu-badge { font: 600 10px/1 system-ui, sans-serif; letter-spacing: .04em; padding: 3px 5px; border-radius: 5px; vertical-align: baseline; background: var(--gpu-soft); }
+    .field.compute { gap: 3px; }
+    @media (max-width: 480px) { .compute-switch .cs-web { display: none; } }
+    .backend-row .compute-switch { background: var(--panel); }
+    .ports > .tabs { margin-bottom: 6px; }
     .stat.launch { grid-column: span 2; }
     .field select { width: auto; min-width: 104px; }
     .stat.launch b { font-size: 14px; font-weight: 600; }
@@ -152,14 +156,63 @@
     canvas.bitmap { display: block; width: 100%; max-width: 720px; height: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
     .anim-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
     .anim-controls .mini { padding: 5px 12px; font-size: 13px; }
-    .anim-controls .seg label { padding: 4px 10px; font-size: 13px; }
-    .anim-controls .seg label:has(input:disabled) { opacity: .45; cursor: not-allowed; }
     .ramp { display: inline-block; width: 120px; height: 10px; border-radius: 3px; background: linear-gradient(90deg, var(--panel), var(--accent)); border: 1px solid var(--line); vertical-align: -1px; }
     .layers-plot svg { display: block; width: 100%; height: auto; }
     tr.off td { color: var(--err); }
     .matrix-preview table { font-size: 12px; }
     .matrix-preview th:first-child { position: sticky; left: 0; background: var(--panel); }
     footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
+
+    /* Compute switch: a pill-shaped segmented control with a sliding thumb.
+       Markup:
+       <div class="compute-switch" role="radiogroup" aria-label="Compute" style="--n:2;--i:0">
+         <label><input type="radio" name="…" value="gpu" checked><svg …/>GPU<span class="cs-chip">WebGPU</span></label>
+         <label><input type="radio" name="…" value="cpu"><svg …/>CPU</label>
+       </div>
+       Set --n to the number of segments and --i to the checked index (JS updates --i on change). */
+    .compute-switch {
+      --cs-h: 38px;
+      position: relative; display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+      align-items: stretch; height: var(--cs-h); padding: 3px; gap: 0;
+      border: 1px solid var(--line); border-radius: 999px; background: var(--soft);
+      transition: opacity .2s ease;
+    }
+    .compute-switch.cs-pending { opacity: .45; pointer-events: none; }
+    .compute-switch::before {
+      content: ""; position: absolute; top: 3px; bottom: 3px; left: 3px;
+      width: calc((100% - 6px) / var(--n, 2));
+      transform: translateX(calc(100% * var(--i, 0)));
+      border-radius: 999px; background: var(--accent);
+      box-shadow: 0 1px 3px rgb(0 0 0 / .25);
+      transition: transform .18s cubic-bezier(.3, .7, .4, 1);
+    }
+    .compute-switch label {
+      position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 0 14px; border-radius: 999px; white-space: nowrap; cursor: pointer; user-select: none;
+      font-size: 13.5px; font-weight: 600; color: var(--muted); transition: color .18s ease;
+    }
+    .compute-switch label:hover { color: var(--ink); }
+    .compute-switch label:has(input:checked) { color: var(--on-accent, #fff); }
+    .compute-switch input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+    .compute-switch label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .compute-switch svg { width: 14px; height: 14px; flex: none; }
+    .compute-switch .cs-chip {
+      padding: 1px 6px; border-radius: 999px; font-size: 10.5px; font-weight: 700; letter-spacing: .02em;
+      background: color-mix(in srgb, currentColor 16%, transparent);
+    }
+    @media (max-width: 480px) {
+      .compute-switch label { padding: 0 9px; gap: 4px; font-size: 12.5px; }
+      .compute-switch .cs-chip { font-size: 9.5px; padding: 1px 5px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .compute-switch::before, .compute-switch label, .compute-switch { transition: none; }
+    }
+    /* "GPU" badge on lab tabs */
+    .gpu-badge {
+      display: inline-block; padding: 1px 5px; border-radius: 4px; border: 1px solid currentColor;
+      font: 700 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .03em;
+      color: var(--gpu-badge, #2f9e6b); vertical-align: 1px;
+    }
 
     @media (max-width: 720px) {
       .wrap { padding-top: 18px; }
@@ -183,16 +236,15 @@
     <img src="icon.svg" alt="" width="52" height="52">
     <div>
       <h1>ParallelCuda Labs</h1>
-      <p>The <a href="https://github.com/Andrew1407/ParallelCuda">ParallelCuda</a> labs, running in your browser. CUDA doesn't run in a browser, so each kernel is ported to a WebGPU compute shader with the same grid, blocks, shared memory, barriers and atomics, and checked and timed against a JavaScript CPU reference.</p>
+      <p>The <a href="https://github.com/Andrew1407/ParallelCuda">ParallelCuda</a> labs, running in your browser. CUDA doesn't run in a browser, so each kernel is ported to a WebGPU compute shader with the same grid, blocks, shared memory, barriers and atomics, with a WebGL2 fragment-shader port as the fallback, and checked and timed against a JavaScript CPU reference.</p>
     </div>
     <button class="theme-toggle" data-theme-toggle></button>
   </header>
 
   <nav class="labs" id="nav" role="tablist" aria-label="Labs"></nav>
-  <div id="gpu-status" class="gpu-status" role="status" hidden></div>
   <main id="labs"></main>
 
-  <footer>Timings are measured in your browser: GPU times include submitting the work and waiting for it, and they vary between runs and devices. WGSL has no 64-bit floats, so the labs' <code>double</code> math runs in f32 on the GPU, while the CPU reference keeps f64. <b style="color:#ec7a4f">DichES</b></footer>
+  <footer>Timings are measured in your browser: GPU times include submitting the work and waiting for it, and they vary between runs and devices. WGSL and GLSL have no 64-bit floats, so the labs' <code>double</code> math runs in f32 on the GPU, while the CPU reference keeps f64. <b style="color:#ec7a4f">DichES</b></footer>
 </div>
 
 <script type="module" src="./app.js"></script>
