@@ -17,10 +17,26 @@ const fmt = (v, d = 4) => {
 };
 const msFmt = (v) => (v === null || v === undefined ? '—' : `${fmt(v, v < 10 ? 3 : 1)} ms`);
 const range = (n, f = (i) => i) => Array.from({ length: n }, (_, i) => f(i));
-const pause = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+// The CPU reference runs in a module worker (cpu-worker.js), so big inputs never block the page.
+const cpuWorker = new Worker(new URL('./cpu-worker.js', import.meta.url), { type: 'module' });
+const cpuJobs = new Map();
+let cpuJobSeq = 0;
+cpuWorker.onmessage = ({ data: { id, r, error } }) => {
+  const job = cpuJobs.get(id);
+  cpuJobs.delete(id);
+  if (error) job.reject(new Error(error)); else job.resolve(r);
+};
+cpuWorker.onerror = (e) => { for (const job of cpuJobs.values()) job.reject(new Error(e.message || 'CPU worker failed')); cpuJobs.clear(); };
+const cpuRun = (job, args) => new Promise((resolve, reject) => {
+  const id = ++cpuJobSeq;
+  cpuJobs.set(id, { resolve, reject });
+  cpuWorker.postMessage({ id, job, args });
+});
 const stat = (value, label, cls = '') => `<div class="stat ${cls}"><b>${value}</b><span>${label}</span></div>`;
 const now = () => performance.now();
-const mean = (xs) => Array.from(xs).reduce((s, v) => s + v, 0) / xs.length;
+// after the next rendering update (or 100 ms in a background tab, where frames don't run)
+const nextFrame = () => new Promise((r) => { let t; const go = () => { clearTimeout(t); setTimeout(r, 0); }; t = setTimeout(go, 100); requestAnimationFrame(go); });
+const mean = (xs) => { let s = 0; for (let i = 0; i < xs.length; i++) s += xs[i]; return s / xs.length; };
 const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? (s[(s.length - 1) >> 1] + s[s.length >> 1]) / 2 : NaN; };
 const speedup = (g, c) => (g && c ? `${fmt(c / g, 2)}×` : '—');
 const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -135,10 +151,8 @@ const launch = (text) => stat(`<code>${esc(text)}</code>`, 'launch', 'launch');
 async function runLab1(p) {
   const N = p.size, b = 1;
   const { A, B } = cpu.lab1Input(N, p.seed);
-  await pause();
-  let t = now();
-  const Ccpu = cpu.lab1Cpu(A, B, N);
-  const cpuMs = now() - t;
+  const { C: Ccpu, ms: cpuMs } = await cpuRun('lab1', { A, B, N });
+  let t;
   let Cgpu = null, gpuMs = null;
   if (await gpuReady) {
     const pipe = await pipeline('lab1.wgsl', 'matrixMult', { MATRIX_SIZE: N });
@@ -235,13 +249,12 @@ async function lab2Gpu(p) {
 
 async function runLab2(p) {
   stopAnim();
+  while (anim.busy) await new Promise((r) => setTimeout(r, 10)); // let an in-flight frame finish before freeing its buffers
   anim.ctx?.gpu?.free();
-  const px = new Uint32Array(p.W * p.H), pxCpu = new Uint32Array(p.W * p.H);
+  const px = new Uint32Array(p.W * p.H);
   const frames = p.frames;
-  await pause();
-  let t = now();
-  for (let k = 1; k <= frames; k++) cpu.lab2Frame(pxCpu, k, p);
-  const cpuMs = (now() - t) / frames;
+  const { px: pxCpu, ms: cpuMs } = await cpuRun('lab2Bench', { p, frames });
+  let t;
   let g = null, gpuMs = null, mismatch = null;
   if (await gpuReady) {
     g = await lab2Gpu(p);
@@ -288,7 +301,7 @@ async function drawTick(box) {
   const t = now();
   try {
     if (anim.engine === 'gpu' && c.gpu) await c.gpu.render(anim.ticks, c.px);
-    else cpu.lab2Frame(c.px, anim.ticks, p);
+    else c.px.set((await cpuRun('lab2Frame', { p, ticks: anim.ticks })).px);
   } finally { anim.busy = false; }
   anim.last = now() - t;
   blit($('canvas', box), c.px, p.W, p.H);
@@ -324,10 +337,8 @@ const SUMS = [
 ];
 async function runLab3(p) {
   const { len, blocks } = p, tpb = Number(p.tpb);
-  await pause();
-  let t = now();
-  const ref = cpu.lab3Cpu(len, blocks, tpb);
-  const cpuMs = now() - t;
+  const { ref, ms: cpuMs } = await cpuRun('lab3', { len, blocks, tpb });
+  let t;
   let parts = null, gpuMs = null, wg = null, gpuSkip = '';
   if (await gpuReady) {
     wg = Math.min(tpb, maxThreads());
@@ -375,11 +386,7 @@ async function runLab4(p) {
   const size = p.size, K = p.repeats, R = p.runs;
   const rand = cpu.msvcRand(p.seed);
   const g = cpu.lab4Input(rand, size), c = cpu.lab4Input(rand, size); // execGlobal, then execConst
-  await pause();
-  let t = now();
-  for (let k = 0; k < K; k++) cpu.lab4Cpu(g.A, g.c);
-  const cpuMs = (now() - t) / K;
-  const ref = { g: cpu.lab4Cpu(g.A, g.c), c: cpu.lab4Cpu(c.A, c.c) };
+  const { ms: cpuMs, ref } = await cpuRun('lab4', { g, c, K });
   const res = { size, K, R, g, c, ref, cpuMs, wg: null, times: { g: [], c: [] }, B: null };
   if (!(await gpuReady)) return res;
   const wg = Math.min(size, maxThreads());
@@ -442,13 +449,9 @@ function renderLab4(d) {
 async function runLab5(p) {
   const { len, blocks, threads } = p;
   if (gpuOk && threads > maxThreads()) throw new Error(`This GPU allows at most ${maxThreads()} threads per workgroup.`);
-  await pause();
-  const out = {};
-  for (const [key, reversed] of [['opt', true], ['unopt', false]]) {
-    const t = now();
-    const counter = cpu.lab5Cpu(len, reversed);
-    out[key] = { cpu: counter, cpuMs: now() - t, gpu: null, gpuMs: null };
-  }
+  const { opt, unopt, series } = await cpuRun('lab5', { len });
+  const out = { series };
+  for (const [key, e] of [['opt', opt], ['unopt', unopt]]) out[key] = { ...e, gpu: null, gpuMs: null };
   if (await gpuReady) {
     for (const [key, entry] of [['opt', 'kernelOptimized'], ['unopt', 'kernelUnoptimized']]) {
       const pipe = await pipeline('lab5.wgsl', entry, { ARR_LENGTH: len, THREADS: threads });
@@ -481,14 +484,7 @@ function renderLab5(d) {
     const e = d[key], pi = piOf(d, key, src), diff = gpuOk ? Math.abs(e.gpu - e.cpu) : 0;
     return `<div class="panel" style="margin:0;padding:14px"><h2 style="margin-bottom:8px">${title} <small>· ${what}</small></h2><div class="stats" style="margin:0">${stat(pi.toFixed(6), 'π estimate')}${stat(fmt(Math.abs(Math.PI - pi), 3), '|π − estimate|')}${stat(`${(src === 'gpu' ? e.gpu : e.cpu).toLocaleString('en')}`, 'atomicAdd calls')}${stat(gpuOk ? msFmt(e.gpuMs) : 'n/a', 'GPU kernel')}${stat(msFmt(e.cpuMs), 'CPU')}${gpuOk ? stat(diff ? `${diff} points` : 'same count', 'GPU vs CPU', diff <= d.len * 1e-4 ? 'good' : 'bad') : ''}</div></div>`;
   };
-  const xs = [], ys = [];
-  let inside = 0;
-  const step = Math.max(1, Math.floor(d.len / 300));
-  for (let i = 0; i < d.len; i++) {
-    const [x, y] = cpu.lab5Point(i);
-    if (x * x + y * y <= 1) inside++;
-    if ((i + 1) % step === 0 || i === d.len - 1) { xs.push(i + 1); ys.push((inside / (i + 1)) * 4); }
-  }
+  const { xs, ys } = d.series;
   return `${engineNote()}
     <div class="algo-cards">${card('opt', 'Optimized', 'counts the points outside the circle')}${card('unopt', 'Unoptimized', 'counts the points inside')}</div>
     <div class="stats">${launch(`<<<${d.blocks}, ${d.threads}>>>, ${d.len} points`)}</div>
@@ -520,10 +516,8 @@ function drawScatter(canvas, len) {
 async function runControl(p) {
   const layers = [p.len, ...parseLayers(p.layers)];
   const input = cpu.controlInput(p.len, p.seed);
-  await pause();
-  let t = now();
-  const ref = cpu.controlCpu(input, layers);
-  const cpuMs = now() - t;
+  const { ref, ms: cpuMs } = await cpuRun('control', { input, layers });
+  let t;
   let steps = null, gpuMs = null;
   if (await gpuReady) {
     const pipe = await pipeline('control.wgsl', 'layerKernel');
@@ -549,6 +543,8 @@ async function runControl(p) {
   }
   return { layers, input, ref, steps, gpuMs, cpuMs };
 }
+// max |a[i] − b[i]|, like Math.max(...) over the pairs (NaN if any pair is NaN)
+const maxAbsDiff = (a, b) => { let m = -Infinity; for (let i = 0; i < a.length; i++) { const d = Math.abs(a[i] - b[i]); if (Number.isNaN(d)) return NaN; if (d > m) m = d; } return m; };
 const parseLayers = (s) => String(s).split(/[\s,;]+/).filter(Boolean).map(Number);
 function controlConsole(d, steps) {
   const show = (a) => Array.from(a, (v) => fixed(v, 6)).join('\n');
@@ -559,18 +555,18 @@ function renderControl(d) {
   const steps = d.steps || d.ref.steps;
   const diverged = d.steps ? d.steps.findIndex((s, i) => s.seed !== d.ref.steps[i].seed) : -1;
   const outGpu = steps[steps.length - 1].out, outCpu = d.ref.output;
-  const maxDiff = d.steps ? Math.max(...Array.from(outCpu, (v, i) => Math.abs(v - outGpu[i]))) : 0;
+  const maxDiff = d.steps ? maxAbsDiff(outCpu, outGpu) : 0;
   const rows = steps.map((s, i) => {
     const r = d.ref.steps[i], off = d.steps && s.seed !== r.seed, n = d.layers[i + 1];
     const seeds = n > 1 ? `${s.seed} … ${s.seed + n - 1}` : `${s.seed}`;
-    return `<tr${off ? ' class="off"' : ''}><td class="num">${i + 1}</td><td class="num">${d.layers[i]} → ${n}</td><td class="num">${s.sum.toFixed(7)}</td><td class="num">${seeds}</td><td class="num">${fixed(mean(s.out), 7)}</td><td class="num">${r.sum.toFixed(7)}</td><td class="num">${fixed(mean(r.out), 7)}</td><td class="num">${d.steps ? fmt(Math.max(...Array.from(r.out, (v, k) => Math.abs(v - s.out[k]))), 2) : "—"}</td></tr>`;
+    return `<tr${off ? ' class="off"' : ''}><td class="num">${i + 1}</td><td class="num">${d.layers[i]} → ${n}</td><td class="num">${s.sum.toFixed(7)}</td><td class="num">${seeds}</td><td class="num">${fixed(mean(s.out), 7)}</td><td class="num">${r.sum.toFixed(7)}</td><td class="num">${fixed(mean(r.out), 7)}</td><td class="num">${d.steps ? fmt(maxAbsDiff(r.out, s.out), 2) : "—"}</td></tr>`;
   }).join('');
   const xs = range(steps.length, (i) => i + 1);
   const note = diverged >= 0
     ? `<p class="note">The GPU path takes a different seed from layer ${diverged + 1}. Its outputs are f32, and <code>tanh</code> of a large argument rounds to exactly 1.0 in f32 but stays just below 1 in double. The host sum then lands on a whole number instead of just under it, so <code>(unsigned long long)sum</code>, the curand seed, is one higher, and every later layer draws other random weights.</p>`
     : '';
   return `${engineNote()}${note}
-    <div class="stats">${stat(outGpu.every((v) => v === outGpu[0]) ? `${outGpu.length} × ${fixed(outGpu[0], 6)}` : Array.from(outGpu, (v) => fixed(v, 4)).join(', '), 'output array')}${timeStats(d.gpuMs, d.cpuMs)}${d.steps ? verdict(diverged < 0 && maxDiff < 1e-5, `max |Δ| ${fmt(maxDiff, 2)}`, diverged >= 0 ? `seed differs at layer ${diverged + 1}` : `max |Δ| ${fmt(maxDiff, 2)}`) : ''}${launch(`${steps.length} layers × <<<n, 1>>>`)}</div>
+    <div class="stats">${stat(outGpu.every((v) => v === outGpu[0]) ? `${outGpu.length} × ${fixed(outGpu[0], 6)}` : outGpu.length > 10 ? `${Array.from(outGpu.subarray(0, 6), (v) => fixed(v, 4)).join(', ')}, … (${outGpu.length} values)` : Array.from(outGpu, (v) => fixed(v, 4)).join(', '), 'output array')}${timeStats(d.gpuMs, d.cpuMs)}${d.steps ? verdict(diverged < 0 && maxDiff < 1e-5, `max |Δ| ${fmt(maxDiff, 2)}`, diverged >= 0 ? `seed differs at layer ${diverged + 1}` : `max |Δ| ${fmt(maxDiff, 2)}`) : ''}${launch(`${steps.length} layers × <<<n, 1>>>`)}</div>
     <p class="hint" style="margin:-6px 0 14px">Thread <code>i</code> seeds curand with <code>(unsigned long long)sum + i</code>, so each output of a layer gets its own weight.</p>
     <div data-copyable data-title="Layer pipeline"><div class="copy-head"><h2>Pipeline <small>· one column per layer, cells shaded by value</small></h2>${actions('png')}</div><div class="plot layers-plot">${layersSvg(d, steps)}</div></div>
     <div class="charts two" style="margin-top:16px">
@@ -587,8 +583,17 @@ function layersSvg(d, steps) {
   const gap = (W - 40 - cols.length * colW) / Math.max(1, cols.length - 1);
   const x = (i) => 20 + i * (colW + gap);
   const parts = cols.map((a, i) => {
-    const n = a.length, ch = (H - top - bottom) / n, y0 = top;
-    const cells = Array.from(a, (v, k) => `<rect x="${x(i)}" y="${(y0 + k * ch).toFixed(2)}" width="${colW}" height="${Math.max(0.6, ch - (ch > 3 ? 1 : 0)).toFixed(2)}" fill="var(--c1)" fill-opacity="${(0.12 + 0.88 * Math.max(0, Math.min(1, v))).toFixed(3)}"><title>layer ${i}, #${k}: ${fixed(v, 6)}</title></rect>`).join('');
+    const n = a.length, y0 = top;
+    // a column is about 200 px tall, so a longer layer is shaded by the mean of each run of outputs
+    const bins = Math.min(n, 200), per = n / bins, ch = (H - top - bottom) / bins;
+    const cells = range(bins, (k) => {
+      const lo = Math.round(k * per), hi = Math.round((k + 1) * per);
+      let v = 0;
+      for (let j = lo; j < hi; j++) v += a[j];
+      v /= hi - lo;
+      const what = hi - lo > 1 ? `#${lo}–#${hi - 1}, mean ${fixed(v, 6)}` : `#${lo}: ${fixed(v, 6)}`;
+      return `<rect x="${x(i)}" y="${(y0 + k * ch).toFixed(2)}" width="${colW}" height="${Math.max(0.6, ch - (ch > 3 ? 1 : 0)).toFixed(2)}" fill="var(--c1)" fill-opacity="${(0.12 + 0.88 * Math.max(0, Math.min(1, v))).toFixed(3)}"><title>layer ${i}, ${what}</title></rect>`;
+    }).join('');
     const link = i ? `<path d="M${x(i - 1) + colW + 3} ${H / 2 - 8} L${x(i) - 3} ${H / 2 - 8}" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#arr)"/>` : '';
     return `${link}${cells}<text x="${x(i) + colW / 2}" y="${H - bottom + 16}" text-anchor="middle">${n}</text><text x="${x(i) + colW / 2}" y="${H - 4}" text-anchor="middle">${i ? `L${i}` : 'in'}</text>`;
   }).join('');
@@ -680,7 +685,25 @@ const LABS = [
   },
 ];
 
-const consoleBox = (text) => `<div data-copyable style="margin-top:16px"><div class="copy-head"><h2>Console output <small>· in the lab's format</small></h2>${actions('text')}</div><pre class="console">${esc(text)}</pre></div>`;
+// A very long console (tens of thousands of lines) would take the browser hundreds of milliseconds
+// to lay out, so the page shows its first lines and keeps the whole text for the copy actions.
+const CONSOLE_LINES = 4000;
+const fullText = new Map();
+let fullSeq = 0;
+const consoleBox = (text) => {
+  let pre, note = '';
+  const lines = text.split('\n');
+  if (lines.length <= CONSOLE_LINES) pre = `<pre class="console">${esc(text)}</pre>`;
+  else {
+    for (const k of fullText.keys()) if (!document.querySelector(`pre[data-full="${k}"]`)) fullText.delete(k);
+    const k = `t${++fullSeq}`;
+    fullText.set(k, text);
+    pre = `<pre class="console" data-full="${k}">${esc(lines.slice(0, CONSOLE_LINES).join('\n'))}\n…</pre>`;
+    note = ` · first ${CONSOLE_LINES.toLocaleString('en')} of ${lines.length.toLocaleString('en')} lines shown, Copy text copies all`;
+  }
+  return `<div data-copyable style="margin-top:16px"><div class="copy-head"><h2>Console output <small>· in the lab's format${note}</small></h2>${actions('text')}</div>${pre}</div>`;
+};
+const consoleText = (pre) => (pre.dataset.full && fullText.get(pre.dataset.full)) || pre.textContent;
 
 // ------------------------------------------------------------------ copying --
 const ACTION_LABEL = { png: 'Copy image', csv: 'Copy CSV', table: 'Copy table', results: 'Copy results', text: 'Copy text', code: 'Copy code', tsv: 'Copy TSV', download: 'Download .tsv' };
@@ -773,7 +796,7 @@ function resultsText(sec) {
     if (group) lines.push(`${group}:`);
     st.querySelectorAll('.stat').forEach((x) => lines.push(`${group ? '  ' : ''}${$('span', x).innerText.trim()}: ${$('b', x).innerText.trim()}`));
   });
-  out.querySelectorAll('pre.console').forEach((el) => lines.push('', 'Console output:', el.textContent));
+  out.querySelectorAll('pre.console').forEach((el) => lines.push('', 'Console output:', consoleText(el)));
   return lines.join('\n');
 }
 
@@ -814,7 +837,7 @@ async function copyAction(btn) {
     }
     const text = kind === 'csv' ? chartCsv(charts.get(box.dataset.chart))
       : kind === 'table' ? tableTsv(box.querySelector('table'))
-      : kind === 'text' || kind === 'code' ? box.querySelector('pre').textContent
+      : kind === 'text' || kind === 'code' ? consoleText(box.querySelector('pre'))
       : resultsText(btn.closest('section.panel'));
     await navigator.clipboard.writeText(text);
     done_('Copied');
@@ -935,16 +958,19 @@ async function run(lab) {
   st.running = true; st.ran = true;
   btn.disabled = true; btn.textContent = 'Running…';
   out.style.opacity = '.45';
+  const t0 = now(), tick = setInterval(() => (btn.textContent = `Running… ${Math.floor((now() - t0) / 1000)}s`), 1000);
   try {
     const data = await lab.run(p);
     out.innerHTML = `<div class="out-actions">${actions('results')}</div>` + lab.render(data, p);
     st.data = data;
+    await nextFrame(); // let the browser lay the new results out in a task of its own, then draw into them
     drawCharts(out);
     lab.after?.(out, data);
   } catch (e) {
     console.error(e);
     out.innerHTML = `<div class="err">${esc(e.message || e)}</div>`;
   } finally {
+    clearInterval(tick);
     st.running = false; btn.disabled = false; btn.textContent = 'Run'; out.style.opacity = '';
   }
 }
