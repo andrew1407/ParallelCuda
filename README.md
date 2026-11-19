@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://andrew1407.github.io/ParallelCuda/" title="Open the labs in the browser">
-    <img src="web/icon.svg" alt="ParallelCuda Labs" width="96" height="96">
+    <img src="web/icon.svg" alt="ParallelCuda Labs" width="140" height="140">
   </a>
 </p>
 

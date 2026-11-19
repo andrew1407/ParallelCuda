@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" data-badge="1">
   <!-- A CUDA grid of 2×2 thread blocks, one block active, each holding 3×3 threads, on a round outlined badge -->
-  <circle cx="32" cy="32" r="30.5" fill="#ffffff" stroke="#3557d6" stroke-width="3"/>
-  <svg x="12.5" y="12.5" width="39" height="39" viewBox="-1 -1 66 66">
+  <circle cx="32" cy="32" r="30" fill="#ffffff" stroke="#3557d6" stroke-width="4"/>
+  <svg x="12.5" y="12.5" width="39" height="39" viewBox="0.2 0.2 63.6 63.6">
     <rect x="2" y="2" width="60" height="60" rx="9" fill="none" stroke="#3557d6" stroke-width="3"/>
     <g stroke-width="2.6">
     <rect x="8" y="8" width="22" height="22" rx="4" fill="#fbf1cc" stroke="#b8971b"/>
